@@ -9,6 +9,14 @@ macro_rules! read_n_bytes {
         $file.read_exact(&mut buf).map(|_| buf)
     }};
 }
+macro_rules! peek_magic {
+    ($file:ident) => {{
+        let mut buf: [u8; 4] = [0; 4];
+        $file.read_exact(&mut buf).and_then(|_| {
+            $file.seek(SeekFrom::Current(-4))
+        }).map(move |_| buf)
+    }};
+}
 
 /// Generic Error to represent a variety of errors emitted by the mixer
 #[derive(Debug, Clone)]
@@ -424,12 +432,72 @@ pub struct Keygroup {
     id: u16, // Index/ID of the keygroup
     poly: i8, // Polyphony. Max number of simultaneous notes played. 0 to 15. -1 means disabled. (Technical documentation describes this field as unsigned, but I've switched it to signed since -1 is off instead of 255 being off)
     priority: u8, // Priority over the assignment of voice channels for members of this group. 0-possibly 99, default is 8. Higher is higeher priority.
-    vclow: u8, // Lowest voice channel the group may use. Usually between 0 and 15
-    vchigh: u8, // Highest voice channel this group may use. 0-15
+    vclow: i8, // Lowest voice channel the group may use. Usually between 0 and 15
+    vchigh: i8, // Highest voice channel this group may use. 0-15 (While not explicitly stated in the documentation, this value being i8 makes sense as the first keygroup typically has this set to 255 which makes more sense interpreted as -1 disabled)
     unk50: u8, // Unown
     unk51: u8, // Unknown
 }
 impl AutoReadWrite for Keygroup {  }
+
+#[derive(Debug)]
+pub struct WAVIChunk {
+    _read_n: usize,
+    header: ChunkHeader,
+    data: PointerTable<SampleInfo>
+}
+impl WAVIChunk {
+    pub fn new(nbwavislots: usize) -> WAVIChunk {
+        WAVIChunk {
+            _read_n: nbwavislots,
+            header: ChunkHeader::default(),
+            data: PointerTable::new(nbwavislots, 0) // Temporarily 0
+        }
+    }
+    pub fn set_read_params(&mut self, nbwavislots: usize) {
+        self._read_n = nbwavislots;
+    }
+}
+impl ReadWrite for WAVIChunk {
+    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
+    }
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+        self.header.read_from_file(reader)?;
+        self.data.set_read_params(self._read_n, self.header.chunklen);
+        self.data.read_from_file(reader)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct PRGIChunk {
+    _read_n: usize,
+    header: ChunkHeader,
+    data: PointerTable<ProgramInfo>
+}
+impl PRGIChunk {
+    pub fn new(nbprgislots: usize) -> PRGIChunk {
+        PRGIChunk {
+            _read_n: nbprgislots,
+            header: ChunkHeader::default(),
+            data: PointerTable::new(nbprgislots, 0) // Temporarily 0
+        }
+    }
+    pub fn set_read_params(&mut self, nbprgislots: usize) {
+        self._read_n = nbprgislots;
+    }
+}
+impl ReadWrite for PRGIChunk {
+    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
+    }
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+        self.header.read_from_file(reader)?;
+        self.data.set_read_params(self._read_n, self.header.chunklen);
+        self.data.read_from_file(reader)?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Default, Reflect)]
 pub struct _KeygroupsSampleDataDelimiter {
@@ -437,45 +505,79 @@ pub struct _KeygroupsSampleDataDelimiter {
 }
 impl AutoReadWrite for _KeygroupsSampleDataDelimiter {  }
 #[derive(Debug)]
-pub struct SWDL {
-    header: SWDLHeader,
-    wavi_header: ChunkHeader,
-    wavi_data: PointerTable<SampleInfo>,
-    prgi_header: ChunkHeader,
-    prgi_data: PointerTable<ProgramInfo>,
-    kgrp_header: ChunkHeader,
-    kgrp_data: Table<Keygroup>,
+pub struct KGRPChunk {
+    header: ChunkHeader,
+    data: Table<Keygroup>,
     padding: Option<_KeygroupsSampleDataDelimiter>
 }
+impl Default for KGRPChunk {
+    fn default() -> KGRPChunk {
+        KGRPChunk {
+            header: ChunkHeader::default(),
+            data: Table::new(0),
+            padding: None
+        }
+    }
+}
+impl ReadWrite for KGRPChunk {
+    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)? + if let Some(pad) = &self.padding { pad.write_to_file(writer)? } else { 0 })
+    }
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+        self.header.read_from_file(reader)?;
+        self.data.set_read_params(self.header.chunklen as usize / 8);
+        self.data.read_from_file(reader)?;
+        self.padding = Some(_KeygroupsSampleDataDelimiter::default());
+        self.padding.as_mut().unwrap().read_from_file(reader)?;
+        // "pcmd" {0x70, 0x63, 0x6D, 0x64}
+        // "eod\20" {0x65, 0x6F, 0x64, 0x20}
+        if &self.padding.as_ref().unwrap().delimiter[..4] == &[0x70, 0x63, 0x6D, 0x64] ||
+            &self.padding.as_ref().unwrap().delimiter[..4] == &[0x65, 0x6F, 0x64, 0x20] {
+            self.padding = None;
+            reader.seek(SeekFrom::Current(-8))?;
+        }
+        Ok(())
+    }
+}
+
+
+
+
+
+
+
+
+#[derive(Debug)]
+pub struct SWDL {
+    header: SWDLHeader,
+    wavi: WAVIChunk,
+    prgi: Option<PRGIChunk>,
+    kgrp: Option<KGRPChunk>
+}
+
 impl SWDL {
     pub fn from_file(mut file: File) -> Result<SWDL, Box<dyn std::error::Error>> {
         let mut header = SWDLHeader::default();
         header.read_from_file(&mut file)?;
-        let mut wavi_header = ChunkHeader::default();
-        wavi_header.read_from_file(&mut file)?;
-        let mut wavi_data: PointerTable<SampleInfo> = PointerTable::new(header.nbwavislots as usize, wavi_header.chunklen);
-        wavi_data.read_from_file(&mut file)?;
-        let mut prgi_header = ChunkHeader::default();
-        prgi_header.read_from_file(&mut file)?;
-        let mut prgi_data: PointerTable<ProgramInfo> = PointerTable::new(header.nbprgislots as usize, prgi_header.chunklen);
-        prgi_data.read_from_file(&mut file)?;
-        let mut kgrp_header = ChunkHeader::default();
-        kgrp_header.read_from_file(&mut file)?;
-        let mut kgrp_data: Table<Keygroup> = Table::new(kgrp_header.chunklen as usize / 8);
-        kgrp_data.read_from_file(&mut file)?;
-        let mut padding = Some(_KeygroupsSampleDataDelimiter::default());
-        padding.as_mut().unwrap().read_from_file(&mut file)?;
-        // "pcmd" {0x70, 0x63, 0x6D, 0x64}
-        // "eod\20" {0x65, 0x6F, 0x64, 0x20}
-        if &padding.as_ref().unwrap().delimiter[..4] == &[0x70, 0x63, 0x6D, 0x64] ||
-            &padding.as_ref().unwrap().delimiter[..4] == &[0x65, 0x6F, 0x64, 0x20] {
-            padding = None;
-            file.seek(SeekFrom::Current(-8))?;
+        // WAVI
+        let mut wavi = WAVIChunk::new(header.nbwavislots as usize);
+        wavi.read_from_file(&mut file)?;
+        // PRGI {0x70, 0x72, 0x67, 0x69}
+        let mut prgi = None;
+        if peek_magic!(file)? == [0x70, 0x72, 0x67, 0x69] {
+            let mut tmp = PRGIChunk::new(header.nbprgislots as usize);
+            tmp.read_from_file(&mut file)?;
+            prgi = Some(tmp);
         }
-
-        // Optional chunks
+        // KGRP {0x6B, 0x67, 0x72, 0x70}
+        let mut kgrp = None;
+        if peek_magic!(file)? == [0x6B, 0x67, 0x72, 0x70] {
+            let mut tmp = KGRPChunk::default();
+            tmp.read_from_file(&mut file)?;
+            kgrp = Some(tmp);
+        }
         Ok(SWDL {
-            header, wavi_header, wavi_data, prgi_header, prgi_data, kgrp_header, kgrp_data, padding
+            header, wavi, prgi, kgrp
         })
     }
 }
@@ -486,37 +588,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = File::open("./bgm0016.swd")?;
     let swdl = SWDL::from_file(raw)?;
 
-    // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi_data.objects.len());
-    // println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
-    // for obj in swdl.wavi_data.objects.iter() {
-    //     println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk1, obj.id, obj.ctune, obj.rootkey, obj.ktps, obj.volume, obj.volume_envelope.unk19, obj.volume_envelope.unk20, obj.volume_envelope.sustain, obj.volume_envelope.decay2, obj.volume_envelope.release, obj.volume_envelope.unk57);
-    // }
+    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi.data.objects.len());
+    println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
+    for obj in swdl.wavi.data.objects.iter() {
+        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk1, obj.id, obj.ctune, obj.rootkey, obj.ktps, obj.volume, obj.volume_envelope.unk19, obj.volume_envelope.unk20, obj.volume_envelope.sustain, obj.volume_envelope.decay2, obj.volume_envelope.release, obj.volume_envelope.unk57);
+    }
 
-    // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.prgi_data.objects.len());
-    // println!("{}\t{}\t{}\t{}\t{}\t{}\t{}", "#", 0x0F, 0x200, 0xAA, 0, 0, "16 bytes of padbyte");
-    // for obj in swdl.prgi_data.objects.iter() {
-    //     println!("{}\t{}\t{}\t{}\t{}\t{}\t{:?}", obj.header.id, obj.header.thatFbyte, obj.header.unk4, obj.header.PadByte, obj.header.unk7, obj.header.unk9, obj.delimiter.delimiter);
-    // }
+    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.prgi.as_ref().unwrap().data.objects.len());
+    println!("{}\t{}\t{}\t{}\t{}\t{}\t{}", "#", 0x0F, 0x200, 0xAA, 0, 0, "16 bytes of padbyte");
+    for obj in swdl.prgi.as_ref().unwrap().data.objects.iter() {
+        println!("{}\t{}\t{}\t{}\t{}\t{}\t{:?}", obj.header.id, obj.header.thatFbyte, obj.header.unk4, obj.header.PadByte, obj.header.unk7, obj.header.unk9, obj.delimiter.delimiter);
+    }
 
-    // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.prgi_data.objects.len());
-    // println!("{}\t{}\t{}\t{}\t{}", "0off1on", "0-4", "1-7", 0x0000, 0x0000);
-    // for obj in swdl.prgi_data.objects.iter() {
-    //     for obj in obj.lfo_table.objects.iter() {
-    //         println!("{}\t{}\t{}\t{}\t{}", obj.unk52, obj.dest, obj.wshape, obj.unk32, obj.unk33);
-    //     }
-    // }
+    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.prgi.as_ref().unwrap().data.objects.len());
+    println!("{}\t{}\t{}\t{}\t{}", "0off1on", "0-4", "1-7", 0x0000, 0x0000);
+    for obj in swdl.prgi.as_ref().unwrap().data.objects.iter() {
+        for obj in obj.lfo_table.objects.iter() {
+            println!("{}\t{}\t{}\t{}\t{}", obj.unk52, obj.dest, obj.wshape, obj.unk32, obj.unk33);
+        }
+    }
 
-    // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.prgi_data.objects.len());
-    // println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 0, "=kgrpid", "kgrpid", -7, 0x02, 1, 3, 127, 127, 40, -1);
-    // for obj in swdl.prgi_data.objects.iter() {
-    //     for obj in obj.splits_table.objects.iter() {
-    //         println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk10, obj.unk11, obj.kgrpid, obj.ctune, obj.unk22, obj.volume_envelope.unk19, obj.volume_envelope.unk20, obj.volume_envelope.sustain, obj.volume_envelope.decay2, obj.volume_envelope.release, obj.volume_envelope.unk57);
-    //     }
-    // }
+    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.prgi.as_ref().unwrap().data.objects.len());
+    println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 0, "=kgrpid", "kgrpid", -7, 0x02, 1, 3, 127, 127, 40, -1);
+    for obj in swdl.prgi.as_ref().unwrap().data.objects.iter() {
+        for obj in obj.splits_table.objects.iter() {
+            println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk10, obj.unk11, obj.kgrpid, obj.ctune, obj.unk22, obj.volume_envelope.unk19, obj.volume_envelope.unk20, obj.volume_envelope.sustain, obj.volume_envelope.decay2, obj.volume_envelope.release, obj.volume_envelope.unk57);
+        }
+    }
 
-    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.kgrp_data.objects.len());
+    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.kgrp.as_ref().unwrap().data.objects.len());
     println!("{}\t{}\t{}\t{}\t{}", "#", "poly0-15(-1 off)", "priority(8 default)", "0-15", "0-15");
-    for obj in swdl.kgrp_data.objects.iter() {
+    for obj in swdl.kgrp.as_ref().unwrap().data.objects.iter() {
         println!("{}\t{}\t\t\t{}\t\t\t{}\t{}", obj.id, obj.poly, obj.priority, obj.vclow, obj.vchigh);
     }
 
