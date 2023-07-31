@@ -32,6 +32,7 @@ pub trait ReadWrite {
 }
 impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
     fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut bytes_written = 0;
         for field_i in 0..self.field_len() {
             let field = self.field_at(field_i).ok_or("Failed to get field!")?;
             let type_info = field.get_represented_type_info().ok_or("Failed to get type info of field!")?;
@@ -40,7 +41,7 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                     if array_info.item_type_name() == "u8" {
                         let sl = field.as_any().downcast_ref::<&[u8]>().ok_or("Error in bevy_reflect!")?;
                         writer.write_all(sl)?;
-                        return Ok(sl.len());
+                        bytes_written += sl.len();
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -48,25 +49,25 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 bevy_reflect::TypeInfo::Value(value_info) => {
                     if value_info.type_name() == "bool" {
                         writer.write_u8(*field.as_any().downcast_ref::<bool>().ok_or("Error in bevy_reflect!")? as u8)?;
-                        return Ok(1);
+                        bytes_written += 1;
                     } else if value_info.type_name() == "u8" {
                         writer.write_u8(*field.as_any().downcast_ref::<u8>().ok_or("Error in bevy_reflect!")?)?;
-                        return Ok(1);
+                        bytes_written += 1;
                     } else if value_info.type_name() == "u16" {
                         writer.write_u16::<LittleEndian>(*field.as_any().downcast_ref::<u16>().ok_or("Error in bevy_reflect!")?)?;
-                        return Ok(2);
+                        bytes_written += 2;
                     } else if value_info.type_name() == "u32" {
                         writer.write_u32::<LittleEndian>(*field.as_any().downcast_ref::<u32>().ok_or("Error in bevy_reflect!")?)?;
-                        return Ok(4);
+                        bytes_written += 4;
                     } else if value_info.type_name() == "i8" {
                         writer.write_i8(*field.as_any().downcast_ref::<i8>().ok_or("Error in bevy_reflect!")?)?;
-                        return Ok(1);
+                        bytes_written += 1;
                     } else if value_info.type_name() == "i16" {
                         writer.write_i16::<LittleEndian>(*field.as_any().downcast_ref::<i16>().ok_or("Error in bevy_reflect!")?)?;
-                        return Ok(2);
+                        bytes_written += 2;
                     } else if value_info.type_name() == "i32" {
                         writer.write_i32::<LittleEndian>(*field.as_any().downcast_ref::<i32>().ok_or("Error in bevy_reflect!")?)?;
-                        return Ok(4);
+                        bytes_written += 4;
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -74,7 +75,7 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 _ => panic!("Unsupported auto type!")
             }
         }
-        Err(Box::new(GenericError::new("Something has gone really reaaaalllyyyy wrong.")))
+        Ok(bytes_written)
     }
     fn read_from_file<R: Read + Seek>(&mut self, file: &mut R) -> Result<(), Box<dyn std::error::Error>> {
         for field_i in 0..self.field_len() {
@@ -280,11 +281,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = File::open("./bgm0016.swd")?;
     let swdl = SWDL::from_file(raw)?;
 
-    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi_data.objects.len());
-    println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
-    for obj in swdl.wavi_data.objects.iter() {
-        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk1, obj.id, obj.ctune, obj.rootkey, obj.ktps, obj.volume, obj.unk19, obj.unk20, obj.sustain, obj.decay2, obj.release, obj.unk57);
-    }
+    // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi_data.objects.len());
+    // println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
+    // for obj in swdl.wavi_data.objects.iter() {
+    //     println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk1, obj.id, obj.ctune, obj.rootkey, obj.ktps, obj.volume, obj.unk19, obj.unk20, obj.sustain, obj.decay2, obj.release, obj.unk57);
+    // }
 
     Ok(())
 }
