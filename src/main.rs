@@ -1,5 +1,5 @@
 use core::panic;
-use std::{fs::File, io::{Read, Write, Seek, SeekFrom}};
+use std::{fs::{File, OpenOptions}, io::{Read, Write, Seek, SeekFrom, Cursor}};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
@@ -37,21 +37,34 @@ impl std::error::Error for GenericError {  }
 
 pub trait AutoReadWrite: Reflect + Struct + Default {  }
 pub trait ReadWrite {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>>;
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>>;
     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>>;
 }
 impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let mut bytes_written = 0;
         for field_i in 0..self.field_len() {
             let field = self.field_at(field_i).ok_or("Failed to get field!")?;
             let type_info = field.get_represented_type_info().ok_or("Failed to get type info of field!")?;
             match type_info {
                 bevy_reflect::TypeInfo::Array(array_info) => {
+                    let capacity = array_info.capacity();
                     if array_info.item_type_name() == "u8" {
-                        let sl = field.as_any().downcast_ref::<&[u8]>().ok_or("Error in bevy_reflect!")?;
-                        writer.write_all(sl)?;
-                        bytes_written += sl.len();
+                        if capacity == 2 {
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 2]>().ok_or("Error in bevy_reflect!")?)?;
+                            bytes_written += 2;
+                        } else if capacity == 4 {
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 4]>().ok_or("Error in bevy_reflect!")?)?;
+                            bytes_written += 4;
+                        } else if capacity == 8 {
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 8]>().ok_or("Error in bevy_reflect!")?)?;
+                            bytes_written += 8;
+                        } else if capacity == 16 {
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 16]>().ok_or("Error in bevy_reflect!")?)?;
+                            bytes_written += 16;
+                        } else {
+                            panic!("Unsupported auto type!");
+                        }
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -160,13 +173,29 @@ impl ReadWrite for Vec<u8> {
     }
 }
 
+/// Trait indicating that the type implementing it indexes itself
+/// Its behavior changes with the data type of the storage.
+/// 
+/// If it is a `Table`,
+///  the code will assume that all the self-indices are in order and start writing,
+///  but **will** panic the moment the self-index does not match the actual index 
+///  of the object in the talbe.
+/// 
+/// If it is a `PointerTable`,
+///  the self-index will be preserved as sparseness is allowed in this data type.
+///  However, if one or more index conflicts emerge, the code **will** panic.
+pub trait IsSelfIndexed {
+    fn is_self_indexed(&self) -> Option<usize>;
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>>;
+}
+
 #[derive(Debug)]
-pub struct Table<T: ReadWrite + Default> {
+pub struct Table<T: ReadWrite + Default + IsSelfIndexed> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
     _read_n: usize,
     objects: Vec<T>
 }
-impl<T: ReadWrite + Default> Table<T> {
+impl<T: ReadWrite + Default + IsSelfIndexed> Table<T> {
     pub fn new(n: usize) -> Table<T> {
         Table { _read_n: n, objects: Vec::with_capacity(n) }
     }
@@ -174,10 +203,15 @@ impl<T: ReadWrite + Default> Table<T> {
         self._read_n = n;
     }
 }
-impl<T: ReadWrite + Default> ReadWrite for Table<T> {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for Table<T> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let mut bytes_written = 0;
-        for object in self.objects.iter() {
+        for (i, object) in self.objects.iter().enumerate() {
+            if let Some(self_index) = object.is_self_indexed() {
+                if self_index != i {
+                    panic!("Table<T> write_to_file: Self-index of object {} is {}. The self-index of an object in a table must match its actual index in the table!!", i, self_index);
+                }
+            }
             bytes_written += object.write_to_file(writer)?;
         }
         Ok(bytes_written)
@@ -193,13 +227,13 @@ impl<T: ReadWrite + Default> ReadWrite for Table<T> {
 }
 
 #[derive(Debug)]
-pub struct PointerTable<T: ReadWrite + Default> {
+pub struct PointerTable<T: ReadWrite + Default + IsSelfIndexed> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
     _read_n: usize,
     _chunk_len: u32,
     objects: Vec<T>
 }
-impl<T: ReadWrite + Default> PointerTable<T> {
+impl<T: ReadWrite + Default + IsSelfIndexed> PointerTable<T> {
     pub fn new(n: usize, chunk_len: u32) -> PointerTable<T> {
         PointerTable { _read_n: n, _chunk_len: chunk_len, objects: Vec::with_capacity(n) }
     }
@@ -208,20 +242,38 @@ impl<T: ReadWrite + Default> PointerTable<T> {
         self._chunk_len = chunk_len;
     }
 }
-impl<T: ReadWrite + Default> ReadWrite for PointerTable<T> {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
-        let pointer_table_byte_len = self.objects.len() * 2;
+impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for PointerTable<T> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        let pointer_table_byte_len;
+        if let Some(_) = self.objects[0].is_self_indexed() {
+            pointer_table_byte_len = (self.objects.iter().map(|x| x.is_self_indexed().unwrap()).max().unwrap() + 1) * 2;
+        } else {
+            pointer_table_byte_len = self.objects.len() * 2;
+        }
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
         let first_pointer = pointer_table_byte_len_aligned;
         let mut accumulated_write = 0;
         let mut accumulated_object_data: Vec<u8> = Vec::new();
-        for val in self.objects.iter() {
-            writer.write_u16::<LittleEndian>((first_pointer + accumulated_write).try_into()?)?;
-            accumulated_write += val.write_to_file(&mut accumulated_object_data)?;
+        let mut accumulated_object_data_cursor = Cursor::new(&mut accumulated_object_data);
+        let pointer_table_start = writer.seek(SeekFrom::Current(0))?;
+        writer.write_all(&vec![0; pointer_table_byte_len as usize])?;
+        for (i, val) in self.objects.iter().enumerate() {
+            let i = val.is_self_indexed().unwrap_or(i);
+            writer.seek(SeekFrom::Start(pointer_table_start + i as u64 * 2))?;
+            if writer.read_u16::<LittleEndian>()? == 0 {
+                // Pointer has not been written in yet
+                writer.seek(SeekFrom::Current(-2))?;
+                writer.write_u16::<LittleEndian>((first_pointer + accumulated_write).try_into()?)?;
+            } else {
+                // Overlapping pointers!
+                panic!("PointerTable<T> write_to_file: The self-index of an object in a pointer table must be unique!!")
+            }
+            accumulated_write += val.write_to_file(&mut accumulated_object_data_cursor)?;
         }
         let padding_aa = pointer_table_byte_len_aligned - pointer_table_byte_len;
+        writer.seek(SeekFrom::End(0))?;
         for _ in 0..padding_aa {
-            writer.write_u8(10)?;
+            writer.write_u8(0xAA)?;
         }
         writer.write_all(&accumulated_object_data)?;
         Ok(pointer_table_byte_len_aligned + accumulated_object_data.len())
@@ -331,6 +383,15 @@ pub struct SampleInfo {
     looplen: u32, //  The length of the loop in bytes, divided by 4. ( multiply by 4 to get size in bytes ) Adding loopbeg + looplen gives the sample's length ! 
     volume_envelope: ADSRVolumeEnvelope
 }
+impl IsSelfIndexed for SampleInfo {
+    fn is_self_indexed(&self) -> Option<usize> {
+        Some(self.id as usize)
+    }
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.id = new_index.try_into()?;
+        Ok(())
+    }
+}
 impl AutoReadWrite for SampleInfo {  }
 
 #[derive(Debug, Default, Reflect)]
@@ -349,6 +410,15 @@ pub struct ProgramInfoHeader {
     unk8: u8, // Most of the time is 0x0
     unk9: u8, // Most of the time is 0x0
 }
+impl IsSelfIndexed for ProgramInfoHeader {
+    fn is_self_indexed(&self) -> Option<usize> {
+        Some(self.id as usize)
+    }
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.id = new_index.try_into()?;
+        Ok(())
+    }
+}
 impl AutoReadWrite for ProgramInfoHeader {  }
 
 #[derive(Debug, Default, Reflect)]
@@ -363,6 +433,14 @@ pub struct LFOEntry {
     delay: u16, // Delay in ms before the LFO's effect is applied after the sample begins playing. (Per-note LFOs! So fancy!)
     unk32: u16, // Unknown, usually 0x0000. Possibly fade-out in ms.
     unk33: u16, // Unknown, usually 0x0000. Possibly an extra parameter? Or a cutoff/lowpass filter's frequency cutoff?
+}
+impl IsSelfIndexed for LFOEntry {
+    fn is_self_indexed(&self) -> Option<usize> {
+        None
+    }
+    fn change_self_index(&mut self, _: usize) -> Result<(), Box<dyn std::error::Error>> {
+        Err(Box::new(GenericError::new("LFO entries do not have indices!!")))
+    }
 }
 impl AutoReadWrite for LFOEntry {  }
 
@@ -396,6 +474,15 @@ pub struct SplitEntry {
     // After here, the last 16 bytes are for the volume enveloped. They override the sample's original volume envelope!
     volume_envelope: ADSRVolumeEnvelope
 }
+impl IsSelfIndexed for SplitEntry {
+    fn is_self_indexed(&self) -> Option<usize> {
+        Some(self.id as usize)
+    }
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.id = new_index.try_into()?;
+        Ok(())
+    }
+}
 impl AutoReadWrite for SplitEntry {  }
 
 #[derive(Debug, Default, Reflect)]
@@ -410,6 +497,14 @@ pub struct ProgramInfo {
     _delimiter: _ProgramInfoDelimiter,
     splits_table: Table<SplitEntry>
 }
+impl IsSelfIndexed for ProgramInfo {
+    fn is_self_indexed(&self) -> Option<usize> {
+        self.header.is_self_indexed()
+    }
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.header.change_self_index(new_index)
+    }
+}
 impl Default for ProgramInfo {
     fn default() -> ProgramInfo {
         ProgramInfo {
@@ -421,7 +516,7 @@ impl Default for ProgramInfo {
     }
 }
 impl ReadWrite for ProgramInfo {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let mut bytes_written = self.header.write_to_file(writer)?;
         bytes_written += self.lfo_table.write_to_file(writer)?;
         // bytes_written += self._delimiter.write_to_file(writer)?;
@@ -450,6 +545,15 @@ pub struct Keygroup {
     unk50: u8, // Unown
     unk51: u8, // Unknown
 }
+impl IsSelfIndexed for Keygroup {
+    fn is_self_indexed(&self) -> Option<usize> {
+        Some(self.id as usize)
+    }
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.id = new_index.try_into()?;
+        Ok(())
+    }
+}
 impl AutoReadWrite for Keygroup {  }
 
 #[derive(Debug)]
@@ -471,7 +575,7 @@ impl WAVIChunk {
     }
 }
 impl ReadWrite for WAVIChunk {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
     }
     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
@@ -501,7 +605,7 @@ impl PRGIChunk {
     }
 }
 impl ReadWrite for PRGIChunk {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
     }
     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
@@ -533,8 +637,8 @@ impl Default for KGRPChunk {
     }
 }
 impl ReadWrite for KGRPChunk {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)? + if self.data.objects.len() % 2 == 1 { vec![0xAA_u8; 8].write_to_file(writer)? } else { 0 })
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)? + if self.data.objects.len() % 2 == 1 { vec![0x67, 0xC0, 0x40, 0x00, 0x88, 0x00, 0xFF, 0x04].write_to_file(writer)? } else { 0 })
         // Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)? + if let Some(pad) = &self._padding { pad.write_to_file(writer)? } else { 0 })
     }
     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
@@ -570,7 +674,7 @@ impl Default for PCMDChunk {
     }
 }
 impl ReadWrite for PCMDChunk {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let len = self.header.write_to_file(writer)? + self.data.write_to_file(writer)?;
         let len_aligned = ((len - 1) | 15) + 1; // Round the length of the pcmd chunk in bytes to the next multiple of 16
         let padding_zero = len_aligned - len;
@@ -620,7 +724,7 @@ impl Default for SWDL {
     }
 }
 impl ReadWrite for SWDL {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let mut bytes_written = self.header.write_to_file(writer)?;
         bytes_written += self.wavi.write_to_file(writer)?;
         bytes_written += if let Some(prgi) = &self.prgi { prgi.write_to_file(writer)? } else { 0 };
@@ -661,9 +765,11 @@ impl ReadWrite for SWDL {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hello, world!");
 
-    let mut raw = File::open("./bgm0016.swd")?;
+    let mut raw = File::open("./bgm0043.swd")?;
     let mut swdl = SWDL::default();
     swdl.read_from_file(&mut raw)?;
+    println!("{}", swdl.write_to_file(&mut OpenOptions::new().write(true).read(true).create_new(true).open("./tmp.swd")?)?);
+    println!("{:#?}", swdl);
 
     println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi.data.objects.len());
     println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
