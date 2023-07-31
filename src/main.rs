@@ -419,6 +419,23 @@ impl ReadWrite for ProgramInfo {
     }
 }
 
+#[derive(Debug, Default, Reflect)]
+pub struct Keygroup {
+    id: u16, // Index/ID of the keygroup
+    poly: i8, // Polyphony. Max number of simultaneous notes played. 0 to 15. -1 means disabled. (Technical documentation describes this field as unsigned, but I've switched it to signed since -1 is off instead of 255 being off)
+    priority: u8, // Priority over the assignment of voice channels for members of this group. 0-possibly 99, default is 8. Higher is higeher priority.
+    vclow: u8, // Lowest voice channel the group may use. Usually between 0 and 15
+    vchigh: u8, // Highest voice channel this group may use. 0-15
+    unk50: u8, // Unown
+    unk51: u8, // Unknown
+}
+impl AutoReadWrite for Keygroup {  }
+
+#[derive(Debug, Default, Reflect)]
+pub struct _KeygroupsSampleDataDelimiter {
+    pub delimiter: [u8; 8],
+}
+impl AutoReadWrite for _KeygroupsSampleDataDelimiter {  }
 #[derive(Debug)]
 pub struct SWDL {
     header: SWDLHeader,
@@ -427,6 +444,8 @@ pub struct SWDL {
     prgi_header: ChunkHeader,
     prgi_data: PointerTable<ProgramInfo>,
     kgrp_header: ChunkHeader,
+    kgrp_data: Table<Keygroup>,
+    padding: Option<_KeygroupsSampleDataDelimiter>
 }
 impl SWDL {
     pub fn from_file(mut file: File) -> Result<SWDL, Box<dyn std::error::Error>> {
@@ -442,10 +461,21 @@ impl SWDL {
         prgi_data.read_from_file(&mut file)?;
         let mut kgrp_header = ChunkHeader::default();
         kgrp_header.read_from_file(&mut file)?;
+        let mut kgrp_data: Table<Keygroup> = Table::new(kgrp_header.chunklen as usize / 8);
+        kgrp_data.read_from_file(&mut file)?;
+        let mut padding = Some(_KeygroupsSampleDataDelimiter::default());
+        padding.as_mut().unwrap().read_from_file(&mut file)?;
+        // "pcmd" {0x70, 0x63, 0x6D, 0x64}
+        // "eod\20" {0x65, 0x6F, 0x64, 0x20}
+        if &padding.as_ref().unwrap().delimiter[..4] == &[0x70, 0x63, 0x6D, 0x64] ||
+            &padding.as_ref().unwrap().delimiter[..4] == &[0x65, 0x6F, 0x64, 0x20] {
+            padding = None;
+            file.seek(SeekFrom::Current(-8))?;
+        }
 
-        
+        // Optional chunks
         Ok(SWDL {
-            header, wavi_header, wavi_data, prgi_header, prgi_data, kgrp_header
+            header, wavi_header, wavi_data, prgi_header, prgi_data, kgrp_header, kgrp_data, padding
         })
     }
 }
@@ -483,6 +513,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //         println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", obj.unk10, obj.unk11, obj.kgrpid, obj.ctune, obj.unk22, obj.volume_envelope.unk19, obj.volume_envelope.unk20, obj.volume_envelope.sustain, obj.volume_envelope.decay2, obj.volume_envelope.release, obj.volume_envelope.unk57);
     //     }
     // }
+
+    println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.kgrp_data.objects.len());
+    println!("{}\t{}\t{}\t{}\t{}", "#", "poly0-15(-1 off)", "priority(8 default)", "0-15", "0-15");
+    for obj in swdl.kgrp_data.objects.iter() {
+        println!("{}\t{}\t\t\t{}\t\t\t{}\t{}", obj.id, obj.poly, obj.priority, obj.vclow, obj.vchigh);
+    }
 
     Ok(())
 }
