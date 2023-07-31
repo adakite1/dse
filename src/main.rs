@@ -12,43 +12,43 @@ macro_rules! read_n_bytes {
 
 pub trait AutoReadWrite {  }
 pub trait ReadWrite<T: Reflect + Struct + Default>: Reflect + Struct {
-    fn from_file(file: &mut File) -> Result<T, Box<dyn std::error::Error>>;
-    fn write_to_file(&self, file: &mut File) -> Result<(), Box<dyn std::error::Error>>;
-    fn read_from_file(&mut self, file: &mut File) -> Result<(), Box<dyn std::error::Error>>;
+    fn from_file<R: Read>(reader: &mut R) -> Result<T, Box<dyn std::error::Error>>;
+    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<(), Box<dyn std::error::Error>>;
+    fn read_from_file<R: Read>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>>;
 }
 impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite<T> for T {
-    fn from_file(file: &mut File) -> Result<T, Box<dyn std::error::Error>> {
+    fn from_file<R: Read>(reader: &mut R) -> Result<T, Box<dyn std::error::Error>> {
         let mut out = Self::default();
-        out.read_from_file(file)?;
+        out.read_from_file(reader)?;
         Ok(out)
     }
-    fn write_to_file(&self, file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
+    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<(), Box<dyn std::error::Error>> {
         for field_i in 0..self.field_len() {
             let field = self.field_at(field_i).ok_or("Failed to get field!")?;
             let type_info = field.get_represented_type_info().ok_or("Failed to get type info of field!")?;
             match type_info {
                 bevy_reflect::TypeInfo::Array(array_info) => {
                     if array_info.item_type_name() == "u8" {
-                        file.write_all(field.as_any().downcast_ref::<&[u8]>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_all(field.as_any().downcast_ref::<&[u8]>().ok_or("Error in bevy_reflect!")?)?;
                     } else {
                         panic!("Unsupported auto type!");
                     }
                 },
                 bevy_reflect::TypeInfo::Value(value_info) => {
                     if value_info.type_name() == "bool" {
-                        file.write_u8(*field.as_any().downcast_ref::<bool>().ok_or("Error in bevy_reflect!")? as u8)?;
+                        writer.write_u8(*field.as_any().downcast_ref::<bool>().ok_or("Error in bevy_reflect!")? as u8)?;
                     } else if value_info.type_name() == "u8" {
-                        file.write_u8(*field.as_any().downcast_ref::<u8>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_u8(*field.as_any().downcast_ref::<u8>().ok_or("Error in bevy_reflect!")?)?;
                     } else if value_info.type_name() == "u16" {
-                        file.write_u16::<LittleEndian>(*field.as_any().downcast_ref::<u16>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_u16::<LittleEndian>(*field.as_any().downcast_ref::<u16>().ok_or("Error in bevy_reflect!")?)?;
                     } else if value_info.type_name() == "u32" {
-                        file.write_u32::<LittleEndian>(*field.as_any().downcast_ref::<u32>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_u32::<LittleEndian>(*field.as_any().downcast_ref::<u32>().ok_or("Error in bevy_reflect!")?)?;
                     } else if value_info.type_name() == "i8" {
-                        file.write_i8(*field.as_any().downcast_ref::<i8>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_i8(*field.as_any().downcast_ref::<i8>().ok_or("Error in bevy_reflect!")?)?;
                     } else if value_info.type_name() == "i16" {
-                        file.write_i16::<LittleEndian>(*field.as_any().downcast_ref::<i16>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_i16::<LittleEndian>(*field.as_any().downcast_ref::<i16>().ok_or("Error in bevy_reflect!")?)?;
                     } else if value_info.type_name() == "i32" {
-                        file.write_i32::<LittleEndian>(*field.as_any().downcast_ref::<i32>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_i32::<LittleEndian>(*field.as_any().downcast_ref::<i32>().ok_or("Error in bevy_reflect!")?)?;
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -58,7 +58,7 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite<T> for T {
         }
         Ok(())
     }
-    fn read_from_file(&mut self, file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read>(&mut self, file: &mut R) -> Result<(), Box<dyn std::error::Error>> {
         for field_i in 0..self.field_len() {
             let field = self.field_at_mut(field_i).ok_or("Failed to get field!")?;
             let type_info = field.get_represented_type_info().ok_or("Failed to get type info of field!")?;
