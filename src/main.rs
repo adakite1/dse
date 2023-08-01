@@ -14,11 +14,12 @@ use swdl::*;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // println!("Hello, world!");
 
-    let mut raw = File::open("./bgm.swd")?;
+    let mut raw = File::open("./bgm0043.swd")?;
     let mut swdl = SWDL::default();
     swdl.read_from_file(&mut raw)?;
-    // swdl.write_to_file(&mut OpenOptions::new().write(true).read(true).create_new(true).open("./tmp.swd")?)?;
-    // println!("{:#?}", swdl);
+
+    // ======== GENERAL TESTS ========
+    println!("{:#?}", swdl);
 
     // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi.data.objects.len());
     // println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
@@ -54,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     println!("{}\t{}\t\t\t{}\t\t\t{}\t{}", obj.id, obj.poly, obj.priority, obj.vclow, obj.vchigh);
     // }
 
-    // ========== EXPERIMENTS ===========
+    // ========== EXPERIMENTS ON INDIVIDUAL ===========
     // if let Some(prgi) = swdl.prgi.as_mut() {
     //     for i in 0..prgi.data.objects.len() {
     //         if i != prgi.data.objects.len() - 1 {
@@ -65,15 +66,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     }
     // }
     // smplid: 45,46,160,73,74,75,166,167,168,122
-    for obj in swdl.wavi.data.objects.iter_mut() {
-        for i in [45,46,160,73,74,75,166,167,168,122] {
-            if obj.id == i {
-                obj.smplpos = 33392;
-            }
-        }
-    }
-    swdl.regenerate_read_markers()?;
-    
+    // ====== EXPERIMENTS ON MAIN SAMPLE BANK ========
+    // for obj in swdl.wavi.data.objects.iter_mut() {
+    //     for i in [45,46,160,73,74,75,166,167,168,122] {
+    //         if obj.id == i {
+    //             obj.smplpos = 33392;
+    //         }
+    //     }
+    // }
 
+    swdl.regenerate_read_markers()?;
+
+    // ====== QUICK TEST BY WRITING DIRECTLY INTO NDS_UNPACK ======
+
+    
+    // ======== XML EXPORT TEST ========
+    let st = quick_xml::se::to_string(&swdl)?;
+    File::create("./test.xml")?.write_all(st.as_bytes())?;
+    let mut swdl_recreated = quick_xml::de::from_str::<SWDL>(&st)?;
+
+    // println!("{:?}", swdl_recreated);
+    swdl_recreated.regenerate_read_markers()?;
+    swdl_recreated.regenerate_automatic_parameters()?;
+    swdl_recreated.write_to_file(&mut OpenOptions::new().write(true).read(true).append(false).create(true).open("./bgm0043-recreated.swd")?)?;
     Ok(())
 }

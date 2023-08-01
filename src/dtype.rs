@@ -1,9 +1,10 @@
 use core::panic;
-use std::{fs::{File, OpenOptions}, io::{Read, Write, Seek, SeekFrom, Cursor}};
+use std::io::{Read, Write, Seek, SeekFrom, Cursor};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use serde::{Serialize, Deserialize};
 
-use crate::swdl::ADSRVolumeEnvelope;
+use crate::swdl::{ADSRVolumeEnvelope, DSEString};
 
 macro_rules! read_n_bytes {
     ($file:ident, $n:literal) => {{
@@ -108,6 +109,8 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 bevy_reflect::TypeInfo::Struct(_) => {
                     if let Some(vol_envelope) = field.as_any().downcast_ref::<ADSRVolumeEnvelope>() {
                         bytes_written += vol_envelope.write_to_file(writer)?;
+                    } else if let Some(dse_string) = field.as_any().downcast_ref::<DSEString>() {
+                        bytes_written += dse_string.write_to_file(writer)?;
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -162,6 +165,8 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 bevy_reflect::TypeInfo::Struct(_) => {
                     if let Some(vol_envelope) = field.as_any_mut().downcast_mut::<ADSRVolumeEnvelope>() {
                         vol_envelope.read_from_file(file)?;
+                    } else if let Some(dse_string) = field.as_any_mut().downcast_mut::<DSEString>() {
+                        dse_string.read_from_file(file)?;
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -199,13 +204,15 @@ pub trait IsSelfIndexed {
     fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>>;
 }
 
-#[derive(Debug)]
-pub struct Table<T: ReadWrite + Default + IsSelfIndexed> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Table<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
+    #[serde(default)]
+    #[serde(skip_serializing)]
     _read_n: usize,
     pub objects: Vec<T>
 }
-impl<T: ReadWrite + Default + IsSelfIndexed> Table<T> {
+impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> Table<T> {
     pub fn new(n: usize) -> Table<T> {
         Table { _read_n: n, objects: Vec::with_capacity(n) }
     }
@@ -216,7 +223,7 @@ impl<T: ReadWrite + Default + IsSelfIndexed> Table<T> {
         self.objects.len()
     }
 }
-impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for Table<T> {
+impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for Table<T> {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let mut bytes_written = 0;
         for (i, object) in self.objects.iter().enumerate() {
@@ -239,14 +246,18 @@ impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for Table<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct PointerTable<T: ReadWrite + Default + IsSelfIndexed> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PointerTable<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
+    #[serde(default)]
+    #[serde(skip_serializing)]
     _read_n: usize,
+    #[serde(default)]
+    #[serde(skip_serializing)]
     _chunk_len: u32,
     pub objects: Vec<T>
 }
-impl<T: ReadWrite + Default + IsSelfIndexed> PointerTable<T> {
+impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn new(n: usize, chunk_len: u32) -> PointerTable<T> {
         PointerTable { _read_n: n, _chunk_len: chunk_len, objects: Vec::with_capacity(n) }
     }
@@ -262,7 +273,7 @@ impl<T: ReadWrite + Default + IsSelfIndexed> PointerTable<T> {
         }
     }
 }
-impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for PointerTable<T> {
+impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTable<T> {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
         let pointer_table_byte_len = self.slots() * 2;
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
