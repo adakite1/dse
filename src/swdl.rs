@@ -1,7 +1,7 @@
 use core::panic;
-use std::{fs::{File, OpenOptions}, io::{Read, Write, Seek, SeekFrom, Cursor}};
-use bevy_reflect::{Reflect, Struct};
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use std::io::{Read, Write, Seek, SeekFrom, Cursor};
+use bevy_reflect::Reflect;
+use byteorder::{ReadBytesExt, WriteBytesExt};
 
 use crate::peek_magic;
 use crate::dtype::{*};
@@ -416,6 +416,35 @@ pub struct SWDL {
     pub kgrp: Option<KGRPChunk>,
     pub pcmd: Option<PCMDChunk>,
     pub eod: ChunkHeader
+}
+impl SWDL {
+    /// Regenerate length, slots, and nb parameters. To keep this working, `write_to_file` should never attempt to read or seek beyond alotted frame, which is initial cursor position and beyond.
+    pub fn regenerate_read_markers(&mut self) -> Result<(), Box<dyn std::error::Error>> { //TODO: make more efficient
+        self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        if self.header.pcmdlen & 0xFFFF0000 == 0xAAAA0000 && self.pcmd.is_none() {
+            // Expected case of separation with main bank. Noop
+        } else if let Some(pcmd) = &mut self.pcmd {
+            self.header.pcmdlen = pcmd.data.len() as u32;
+            pcmd.header.chunklen = pcmd.data.len() as u32;
+        } else {
+            panic!("What");
+        }
+        self.header.nbwavislots = self.wavi.data.slots() as u16;
+        self.header.nbprgislots = self.prgi.as_ref().map(|prgi| prgi.data.slots() as u16).unwrap_or(128); // In the main bank, this is set to 128 even though there is no prgi chunk
+        self.header.wavilen = self.wavi.data.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        self.wavi.header.chunklen = self.header.wavilen;
+        if let Some(prgi) = &mut self.prgi {
+            prgi.header.chunklen = prgi.data.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+            for obj in prgi.data.objects.iter_mut() {
+                obj.header.nbsplits = obj.splits_table.len() as u16;
+                obj.header.nblfos = obj.lfo_table.len() as u8;
+            }
+        }
+        if let Some(kgrp) = &mut self.kgrp {
+            kgrp.header.chunklen = kgrp.data.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        }
+        Ok(())
+    }
 }
 impl Default for SWDL {
     fn default() -> SWDL {

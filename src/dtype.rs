@@ -3,7 +3,7 @@ use std::{fs::{File, OpenOptions}, io::{Read, Write, Seek, SeekFrom, Cursor}};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
-use crate::ADSRVolumeEnvelope;
+use crate::swdl::ADSRVolumeEnvelope;
 
 macro_rules! read_n_bytes {
     ($file:ident, $n:literal) => {{
@@ -18,6 +18,15 @@ macro_rules! peek_magic {
         $file.read_exact(&mut buf).and_then(|_| {
             $file.seek(SeekFrom::Current(-4))
         }).map(move |_| buf)
+    }};
+}
+#[macro_export]
+macro_rules! peek_byte {
+    ($file:ident) => {{
+        let mut buf: [u8; 1] = [0; 1];
+        $file.read_exact(&mut buf).and_then(|_| {
+            $file.seek(SeekFrom::Current(-1))
+        }).map(move |_| buf[0])
     }};
 }
 
@@ -203,6 +212,9 @@ impl<T: ReadWrite + Default + IsSelfIndexed> Table<T> {
     pub fn set_read_params(&mut self, n: usize) {
         self._read_n = n;
     }
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
 }
 impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for Table<T> {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
@@ -242,15 +254,17 @@ impl<T: ReadWrite + Default + IsSelfIndexed> PointerTable<T> {
         self._read_n = n;
         self._chunk_len = chunk_len;
     }
+    pub fn slots(&self) -> usize {
+        if let Some(_) = self.objects[0].is_self_indexed() {
+            self.objects.iter().map(|x| x.is_self_indexed().unwrap()).max().unwrap() + 1
+        } else {
+            self.objects.len()
+        }
+    }
 }
 impl<T: ReadWrite + Default + IsSelfIndexed> ReadWrite for PointerTable<T> {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
-        let pointer_table_byte_len;
-        if let Some(_) = self.objects[0].is_self_indexed() {
-            pointer_table_byte_len = (self.objects.iter().map(|x| x.is_self_indexed().unwrap()).max().unwrap() + 1) * 2;
-        } else {
-            pointer_table_byte_len = self.objects.len() * 2;
-        }
+        let pointer_table_byte_len = self.slots() * 2;
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
         let first_pointer = pointer_table_byte_len_aligned;
         let mut accumulated_write = 0;
