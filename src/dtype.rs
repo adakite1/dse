@@ -204,7 +204,7 @@ pub trait IsSelfIndexed {
     fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>>;
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Table<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
     #[serde(default)]
@@ -214,6 +214,9 @@ pub struct Table<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     pub objects: Vec<T>
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> Table<T> {
+    pub fn table_is_empty(table: &Table<T>) -> bool {
+        table.len() == 0
+    }
     pub fn new(n: usize) -> Table<T> {
         Table { _read_n: n, objects: Vec::with_capacity(n) }
     }

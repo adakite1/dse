@@ -636,10 +636,14 @@ impl AutoReadWrite for _ProgramInfoDelimiter {  }
 pub struct ProgramInfo {
     #[serde(flatten)]
     pub header: ProgramInfoHeader,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Table::table_is_empty")]
     pub lfo_table: Table<LFOEntry>,
     #[serde(default)]
     #[serde(skip_serializing)]
     pub _delimiter: _ProgramInfoDelimiter,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Table::table_is_empty")]
     pub splits_table: Table<SplitEntry>
 }
 impl IsSelfIndexed for ProgramInfo {
@@ -824,11 +828,28 @@ impl ReadWrite for KGRPChunk {
     }
 }
 
+mod base64 {
+    use serde::{Serialize, Deserialize};
+    use serde::{Deserializer, Serializer};
+    use base64::{Engine as _, engine::general_purpose};
+
+    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        let base64 = general_purpose::STANDARD.encode(v);
+        String::serialize(&base64, s)
+    }
+    
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let base64 = String::deserialize(d)?;
+        general_purpose::STANDARD.decode(base64)
+            .map_err(|e| serde::de::Error::custom(e))
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PCMDChunk {
     #[serde(default)]
     #[serde(skip_serializing)]
     pub header: ChunkHeader,
+    #[serde(with="base64")]
     pub data: Vec<u8>,
     #[serde(default)]
     #[serde(skip_serializing)]
