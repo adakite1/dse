@@ -276,7 +276,6 @@ dependencies = [
  "glob",
  "quick-xml",
  "serde",
- "ux",
 ]
 
 [[package]]
@@ -683,12 +682,6 @@ dependencies = [
  "getrandom",
  "serde",
 ]
-
-[[package]]
-name = "ux"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cb3ff47e36907a6267572c1e398ff32ef78ac5131de8aa272e53846592c207e"
 
 [[package]]
 name = "version_check"
