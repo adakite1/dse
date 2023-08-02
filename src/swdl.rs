@@ -335,46 +335,144 @@ impl IsSelfIndexed for SampleInfo {
 }
 impl AutoReadWrite for SampleInfo {  }
 
+mod deserialize_with {
+    /// There's a bug in serde where serializing with the attribute #[serde(flatten)] works,
+    ///  but for any format other than JSON the deserializer crashes when reading back those same files.
+    /// While it remains unfixed, a workaround was created thanks to @tobz1000 on Github and shared here: https://github.com/RReverser/serde-xml-rs/issues/137#issuecomment-695341295
+    /// Although we can just not flatten the prgi chunk's headers into the entries themselves, the two other chunks, wavi and kgrp are both already
+    ///  flat by design (the header is not stored in a separate struct key like in prgi), so I thought it would be helpful to also
+    ///  flatten prgi :)
+
+    /// Workaround for a bug with deserialising flattened structs with serde-xml-rs:
+    /// https://github.com/RReverser/serde-xml-rs/issues/137
+    /// To apply this workaround, add this attribute to any primitive field which is either in a
+    /// flattened struct, or is being deserialised in a flattened struct via a transparent newtype:
+    /// `#[deserialize_with = "flattened_xml_attr"]`
+
+    use fmt::Display;
+    use serde::{Deserialize, Deserializer};
+    use std::fmt;
+
+    // Inspired by https://docs.rs/serde-aux/0.6.1/serde_aux/field_attributes/fn.deserialize_number_from_string.html
+    pub fn flattened_xml_attr<'de, D: Deserializer<'de>, T: FromXmlStr + Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<T, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum TypeOrString<T> {
+            Ty(T),
+            String(String),
+        }
+
+        match TypeOrString::<T>::deserialize(deserializer)? {
+            TypeOrString::Ty(t) => Ok(t),
+            TypeOrString::String(s) => T::from_str(&s).map_err(serde::de::Error::custom),
+        }
+    }
+
+    /// Trait to define on types which we need to deserialize from XML within a flattened struct, for
+    /// which the `std::str::FromStr` is absent/unsuitable. This should mirror the behaviour of
+    /// serde-xml-rs for Serde data model types.
+    pub trait FromXmlStr: Sized {
+        type Error: Display;
+        fn from_str(s: &str) -> Result<Self, Self::Error>;
+        fn deserialize_from_type<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+    }
+
+    macro_rules! impl_from_xml_str_as_from_str {
+        ($($t:ty)*) => {
+            $(
+                impl FromXmlStr for $t {
+                    type Error = <$t as std::str::FromStr>::Err;
+                    fn from_str(s: &str) -> Result<Self, Self::Error> {
+                        s.parse()
+                    }
+
+                    fn deserialize_from_type<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                        <$t>::deserialize(deserializer)
+                    }
+                }
+            )*
+        };
+    }
+
+    impl_from_xml_str_as_from_str! {
+        usize u8 u16 u32 u64 u128
+        isize i8 i16 i32 i64 i128
+        f32 f64 char
+    }
+
+    /// Can parse from "1"/"0" as well as "true"/"false".
+    impl FromXmlStr for bool {
+        type Error = String;
+
+        fn from_str(s: &str) -> Result<Self, Self::Error> {
+            match s {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                s => Err(format!("\"{}\" is not a valid bool", s)),
+            }
+        }
+
+        fn deserialize_from_type<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            bool::deserialize(deserializer)
+        }
+    }
+}
+
 #[derive(Debug, Default, Reflect, Serialize, Deserialize)]
 pub struct ProgramInfoHeader {
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(rename = "@id")]
     pub id: u16, // Index of the pointer in the pointer table. Also corresponding to the program ID in the corresponding SMDL file!
     
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing)]
     pub nbsplits: u16, // Nb of samples mapped to this preset in the split table.
 
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(rename = "@prgvol")]
     pub prgvol: i8, // Volume of the entire program.
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(rename = "@prgpan")]
     pub prgpan: i8, // Pan of the entire program (0-127, 64 mid, 127 right, 0 left)
     
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk3: u8, // Most of the time 0x00
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default = "GenericDefaultU8::<0x0F>::value")]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub thatFbyte: u8, // Most of the time 0x0F
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default = "GenericDefaultU16::<0x200>::value")]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk4: u16, // Most of the time 0x200
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk5: u8, // Most of the time is 0x00
 
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing)]
     pub nblfos: u8, // Nb of entries in the LFO table.
 
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(rename = "@PadByte")]
     pub PadByte: u8, // Most of the time is 0xAA, or 0x00. Value here used as the delimiter and padding later between the LFOTable and the SplitEntryTable (and more)
     
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk7: u8, // Most of the time is 0x0
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk8: u8, // Most of the time is 0x0
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk9: u8, // Most of the time is 0x0
@@ -396,7 +494,7 @@ pub struct LFOEntry {
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk34: u8, // Unknown, usually 0x00. Does seem to have an effect with a certain combination of other values in the other parameters.
     #[serde(default)]
-    #[serde(rename = "@unk52_OftenOnWhenLFOIsInUse")]
+    #[serde(rename = "@unk52_lfo_on")]
     pub unk52: u8, // Unknown, usually 0x00. Most of the time, value is 1 when the LFO is in use.
     
     #[serde(rename = "@dest")]
@@ -416,10 +514,10 @@ pub struct LFOEntry {
     pub delay: u16, // Delay in ms before the LFO's effect is applied after the sample begins playing. (Per-note LFOs! So fancy!)
     
     #[serde(default)]
-    #[serde(rename = "@unk32_PossiblyFadeOutMS")]
+    #[serde(rename = "@unk32_fadeout")]
     pub unk32: u16, // Unknown, usually 0x0000. Possibly fade-out in ms.
     #[serde(default)]
-    #[serde(rename = "@unk33_PossiblyExtraParam_Or_LowpassFreq")]
+    #[serde(rename = "@unk33_lowpassfreq")]
     pub unk33: u16, // Unknown, usually 0x0000. Possibly an extra parameter? Or a cutoff/lowpass filter's frequency cutoff?
 }
 impl IsSelfIndexed for LFOEntry {
@@ -443,7 +541,7 @@ pub struct SplitEntry {
     
     #[serde(default = "GenericDefaultU8::<0x02>::value")]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
-    pub unk11: u8, // Unknown. Is always the same value as offset 0x1A below! (It doesn't seem to match kgrpid, so I'm wondering which byte this might be referring to:::: It refers to unk22, the one after kgrpid) (Possibly "bend range" according to assumptions made from teh DSE screenshots)
+    pub unk11: u8, // Unknown. Is always the same value as offset 0x1A below! (It doesn't seem to match kgrpid, so I'm wondering which byte this might be referring to:::: It refers to unk22, the one after kgrpid) (Possibly "bend range" according to assumptions made from teh DSE screenshots) (Could it maybe affect how some tracks sound if it is ever defined and we discards it?)
     #[serde(default = "GenericDefaultU8::<0x01>::value")]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk25: u8, // Unknown. Possibly a boolean.
@@ -536,6 +634,7 @@ pub struct _ProgramInfoDelimiter {
 impl AutoReadWrite for _ProgramInfoDelimiter {  }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProgramInfo {
+    #[serde(flatten)]
     pub header: ProgramInfoHeader,
     pub lfo_table: Table<LFOEntry>,
     #[serde(default)]

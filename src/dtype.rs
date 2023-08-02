@@ -210,6 +210,7 @@ pub struct Table<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     #[serde(default)]
     #[serde(skip_serializing)]
     _read_n: usize,
+    #[serde(rename = "o")]
     pub objects: Vec<T>
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> Table<T> {
@@ -255,6 +256,7 @@ pub struct PointerTable<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     #[serde(default)]
     #[serde(skip_serializing)]
     _chunk_len: u32,
+    #[serde(rename = "o")]
     pub objects: Vec<T>
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
