@@ -25,52 +25,20 @@ jobs:
         with:
           RUSTTARGET: ${{ matrix.target }}
           EXTRA_FILES: "README.md LICENSE"
-  x86_64-pc-windows-gnu:
-    name: x86_64-pc-windows-gnu
+  build:
+    name: ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-gnu, x86_64-unknown-linux-musl, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@master
       - name: Compile
         id: compile
         uses: rust-build/rust-build.action@v1.4.3
         with:
-          RUSTTARGET: x86_64-pc-windows-gnu
-          UPLOAD_MODE: none
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: Binary
-          path: |
-            ${{ steps.compile.outputs.BUILT_ARCHIVE }}
-            ${{ steps.compile.outputs.BUILT_CHECKSUM }}
-  x86_64-unknown-linux-musl:
-    name: x86_64-unknown-linux-musl
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@master
-      - name: Compile
-        id: compile
-        uses: rust-build/rust-build.action@v1.4.3
-        with:
-          RUSTTARGET: x86_64-unknown-linux-musl
-          UPLOAD_MODE: none
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: Binary
-          path: |
-            ${{ steps.compile.outputs.BUILT_ARCHIVE }}
-            ${{ steps.compile.outputs.BUILT_CHECKSUM }}
-  x86_64-apple-darwin:
-    name: x86_64-apple-darwin
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@master
-      - name: Compile
-        id: compile
-        uses: rust-build/rust-build.action@v1.4.3
-        with:
-          RUSTTARGET: x86_64-apple-darwin
+          RUSTTARGET: ${{ matrix.target }}
           UPLOAD_MODE: none
       - name: Upload artifact
         uses: actions/upload-artifact@v3
