@@ -1,6 +1,10 @@
 # .github/workflows/release.yml
 
 on:
+  push:
+    branches:
+      - master
+  pull_request:
   release:
     types: [created]
 
