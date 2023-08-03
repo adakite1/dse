@@ -1,3 +1,6 @@
+/// Example: .\swdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.swd -o unpack
+/// Example: .\swdl_tool.exe from-xml .\unpack\*.swd.xml -o .\NDS_UNPACK\data\SOUND\BGM\
+
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
