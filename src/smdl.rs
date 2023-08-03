@@ -410,7 +410,7 @@ mod events {
         #[serde(rename = "@code")]
         #[serde(with = "named")]
         code: u8,
-        parameters: [u8; 3]
+        parameters: [u8; 5]
     }
     impl Other {
         pub fn is_eot_event(&self) -> bool {
