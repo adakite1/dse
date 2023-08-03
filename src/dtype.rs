@@ -31,6 +31,39 @@ macro_rules! peek_byte {
     }};
 }
 
+pub struct GenericDefaultI8<const U: i8>;
+impl<const U: i8> GenericDefaultI8<U> {
+    pub fn value() -> i8 {
+        U
+    }
+}
+pub struct GenericDefaultU8<const U: u8>;
+impl<const U: u8> GenericDefaultU8<U> {
+    pub fn value() -> u8 {
+        U
+    }
+}
+pub struct GenericDefaultU16<const U: u16>;
+impl<const U: u16> GenericDefaultU16<U> {
+    pub fn value() -> u16 {
+        U
+    }
+}
+pub struct GenericDefaultU32<const U: u32>;
+impl<const U: u32> GenericDefaultU32<U> {
+    pub fn value() -> u32 {
+        U
+    }
+}
+
+pub struct GenericDefaultByteArray<const V: u8, const U: usize>;
+impl<const V: u8, const U: usize> GenericDefaultByteArray<V, U> {
+    pub fn value() -> [u8; U] {
+        [V; U]
+    }
+}
+
+
 /// Generic Error to represent a variety of errors emitted by the mixer
 #[derive(Debug, Clone)]
 pub struct GenericError(String);
@@ -109,7 +142,9 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 bevy_reflect::TypeInfo::Struct(_) => {
                     if let Some(vol_envelope) = field.as_any().downcast_ref::<ADSRVolumeEnvelope>() {
                         bytes_written += vol_envelope.write_to_file(writer)?;
-                    } else if let Some(dse_string) = field.as_any().downcast_ref::<DSEString>() {
+                    } else if let Some(dse_string) = field.as_any().downcast_ref::<DSEString<0xAA>>() {
+                        bytes_written += dse_string.write_to_file(writer)?;
+                    } else if let Some(dse_string) = field.as_any().downcast_ref::<DSEString<0xFF>>() {
                         bytes_written += dse_string.write_to_file(writer)?;
                     } else {
                         panic!("Unsupported auto type!");
@@ -165,7 +200,9 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 bevy_reflect::TypeInfo::Struct(_) => {
                     if let Some(vol_envelope) = field.as_any_mut().downcast_mut::<ADSRVolumeEnvelope>() {
                         vol_envelope.read_from_file(file)?;
-                    } else if let Some(dse_string) = field.as_any_mut().downcast_mut::<DSEString>() {
+                    } else if let Some(dse_string) = field.as_any_mut().downcast_mut::<DSEString<0xAA>>() {
+                        dse_string.read_from_file(file)?;
+                    } else if let Some(dse_string) = field.as_any_mut().downcast_mut::<DSEString<0xFF>>() {
                         dse_string.read_from_file(file)?;
                     } else {
                         panic!("Unsupported auto type!");

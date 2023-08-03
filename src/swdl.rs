@@ -27,71 +27,46 @@ const fn serde_use_common_values_for_unknowns<T>(_: &T) -> bool {
 /// Any other fields are also left alone
 
 #[derive(Debug, Default, Reflect)]
-pub struct DSEString {
+pub struct DSEString<const U: u8> {
     inner: [u8; 16]
 }
-impl TryFrom<String> for DSEString {
+impl<const U: u8> TryFrom<String> for DSEString<U> {
     type Error = GenericError;
 
-    fn try_from(value: String) -> Result<DSEString, Self::Error> {
+    fn try_from(value: String) -> Result<DSEString<U>, Self::Error> {
         if !value.is_ascii() {
             return Err(GenericError::new("Cannot create `DSEString` from the provided values! String contains non-ASCII characters!"));
         }
         if value.as_bytes().len() > 15 {
             return Err(GenericError::new("Cannot create `DSEString` from the provided values! String contains more than 15 characters!"));
         }
-        let mut buf: [u8; 16] = [0xAA; 16];
+        let mut buf: [u8; 16] = [U; 16];
         for (i, &c) in value.as_bytes().iter().chain(std::iter::once(&0x00)).enumerate() {
             buf[i] = c;
         }
         Ok(DSEString { inner: buf })
     }
 }
-impl Display for DSEString {
+impl<const U: u8> Display for DSEString<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", std::str::from_utf8(
             &self.inner[..self.inner.as_ref().iter().position(|&x| x == 0).expect("Invalid DSE string! Null terminator not found!!")]
         ).expect("Invalid DSE string! Non-ASCII (actually, not even UTF-8) characters found!!"))
     }
 }
-impl AutoReadWrite for DSEString {  }
-impl Serialize for DSEString {
+impl<const U: u8> AutoReadWrite for DSEString<U> {  }
+impl<const U: u8> Serialize for DSEString<U> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: serde::Serializer {
         self.to_string().serialize(serializer)
     }
 }
-impl<'de> Deserialize<'de> for DSEString {
+impl<'de, const U: u8> Deserialize<'de> for DSEString<U> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de> {
         Ok(DSEString::try_from(String::deserialize(deserializer)?).unwrap())
-    }
-}
-
-struct GenericDefaultI8<const U: i8>;
-impl<const U: i8> GenericDefaultI8<U> {
-    fn value() -> i8 {
-        U
-    }
-}
-struct GenericDefaultU8<const U: u8>;
-impl<const U: u8> GenericDefaultU8<U> {
-    fn value() -> u8 {
-        U
-    }
-}
-struct GenericDefaultU16<const U: u16>;
-impl<const U: u16> GenericDefaultU16<U> {
-    fn value() -> u16 {
-        U
-    }
-}
-struct GenericDefaultU32<const U: u32>;
-impl<const U: u32> GenericDefaultU32<U> {
-    fn value() -> u32 {
-        U
     }
 }
 
@@ -109,7 +84,7 @@ pub struct SWDLHeader {
     #[serde(skip_serializing)]
     pub flen: u32,
     #[serde(default = "GenericDefaultU16::<0x415>::value")]
-    #[serde(skip_serializing)]
+    #[serde(rename = "@version")]
     pub version: u16,
     pub unk1: u8,
     pub unk2: u8,
@@ -138,7 +113,7 @@ pub struct SWDLHeader {
     pub centisecond: u8, // unsure
     
     #[serde(rename = "@fname")]
-    pub fname: DSEString,
+    pub fname: DSEString<0xAA>,
 
     /// Note: 4-bytes represented as one u32
     #[serde(default = "GenericDefaultU32::<0xAAAAAA00>::value")]
@@ -765,7 +740,7 @@ pub struct PCMDChunk {
     #[serde(default)]
     #[serde(skip_serializing)]
     pub header: ChunkHeader,
-    #[serde(with="base64")]
+    #[serde(with = "base64")]
     pub data: Vec<u8>,
     #[serde(default)]
     #[serde(skip_serializing)]

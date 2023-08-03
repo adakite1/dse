@@ -13,3 +13,4 @@ quick-xml = { version = "0.30.0", features = ["serialize"] }
 base64 = "0.21.2"
 clap = { version = "4.3.19", features = ["derive"] }
 glob = "0.3.1"
+phf = { version = "0.11.2", features = ["macros"] }
