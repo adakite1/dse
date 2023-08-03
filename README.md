@@ -23,7 +23,7 @@ This also guarantees that, as long as the writer picks the appropriate level of 
 
 ### Usage
 
-While this can be used as a Rustlang crate for those who are feeling adventurous, the intended way to use it is to use the binaries the crate generates. Pre-built binaries are available through here: https://github.com/adakite1/dse/actions
+While this can be used as a Rustlang crate for those who are feeling adventurous, the intended way to use it is to use the binaries the crate generates. Pre-built binaries are available through [here](https://github.com/adakite1/dse/actions).
 
 But! If you wanna build it yourself, you can do that too:
 1. Install Rustlang
