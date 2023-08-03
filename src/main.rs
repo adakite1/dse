@@ -3,23 +3,26 @@ use std::{fs::{File, OpenOptions}, io::{Read, Write, Seek, SeekFrom, Cursor}};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
+mod deserialize_with;
 pub mod dtype;
 pub mod swdl;
+pub mod smdl;
 
-use dtype::*;
+use dtype::{*};
 use swdl::*;
+use smdl::*;
 
 //// NOTE: Any struct fields starting with an _ indicates that that struct field will be ignored when writing, with its appropriate value generate on-the-fly based on the other fields
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // println!("Hello, world!");
+    println!("Hello, world!");
 
-    let mut raw = File::open("./bgm0043.swd")?;
-    let mut swdl = SWDL::default();
-    swdl.read_from_file(&mut raw)?;
+    // let mut raw = File::open("./bgm0002.swd")?;
+    // let mut swdl = SWDL::default();
+    // swdl.read_from_file(&mut raw)?;
 
     // ======== GENERAL TESTS ========
-    println!("{:#?}", swdl);
+    // println!("{:#?}", swdl);
 
     // println!("{} objects extracted, check over the following values, they should mostly match the first row.", swdl.wavi.data.objects.len());
     // println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", 43521, "#", -7, 60, 0, 127, 1, 3, 127, 127, 40, -1);
@@ -75,19 +78,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     }
     // }
 
-    swdl.regenerate_read_markers()?;
-
     // ====== QUICK TEST BY WRITING DIRECTLY INTO NDS_UNPACK ======
-
+    // swdl.regenerate_read_markers()?;
+    // 
     
     // ======== XML EXPORT TEST ========
-    let st = quick_xml::se::to_string(&swdl)?;
-    File::create("./test.xml")?.write_all(st.as_bytes())?;
-    let mut swdl_recreated = quick_xml::de::from_str::<SWDL>(&st)?;
+    // let st = quick_xml::se::to_string(&swdl)?;
+    // File::create("./test0002swd.xml")?.write_all(st.as_bytes())?;
+    // let mut swdl_recreated = quick_xml::de::from_str::<SWDL>(&st)?;
 
     // println!("{:?}", swdl_recreated);
-    swdl_recreated.regenerate_read_markers()?;
-    swdl_recreated.regenerate_automatic_parameters()?;
-    swdl_recreated.write_to_file(&mut OpenOptions::new().write(true).read(true).append(false).create(true).open("./bgm0043-recreated.swd")?)?;
+    // swdl_recreated.regenerate_read_markers()?;
+    // swdl_recreated.regenerate_automatic_parameters()?;
+    // swdl_recreated.write_to_file(&mut OpenOptions::new().write(true).read(true).append(false).create(true).open("./bgm-recreated.swd")?)?;
+    
+
+
+
+
+
+
+
+    // ========= SMDL PARSER TESTS AND STUFF ==========
+    let mut raw = File::open("./bgm0101.smd")?;
+    let mut smdl = SMDL::default();
+    smdl.read_from_file(&mut raw)?;
+        
+    let st = quick_xml::se::to_string(&smdl)?;
+    File::create("./testsmdl.xml")?.write_all(st.as_bytes())?;
+    let mut smdl_recreated = quick_xml::de::from_str::<SMDL>(&st)?;
+
+    //=Read from xml=
+    // let raw = std::fs::read_to_string("./testsmdl.xml")?;
+    // let mut smdl_recreated = quick_xml::de::from_str::<SMDL>(&raw)?;
+
+    smdl_recreated.regenerate_read_markers()?;
+    // smdl.write_to_file(&mut OpenOptions::new().write(true).read(true).append(false).create(true).open("./recreated.smd")?)?;
+
+
+
+
+
+
+
+
     Ok(())
 }
