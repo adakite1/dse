@@ -64,7 +64,7 @@ impl<const V: u8, const U: usize> GenericDefaultByteArray<V, U> {
 }
 
 
-/// Generic Error to represent a variety of errors emitted by the mixer
+/// Generic Error to represent a variety of errors
 #[derive(Debug, Clone)]
 pub struct GenericError(String);
 impl GenericError {
