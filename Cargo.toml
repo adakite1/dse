@@ -16,3 +16,4 @@ glob = "0.3.1"
 phf = { version = "0.11.2", features = ["macros"] }
 midly = "0.5.3"
 chrono = "0.4.26"
+colored = "2"

@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use byteorder::{WriteBytesExt, LittleEndian};
 use chrono::{DateTime, Local, Datelike, Timelike};
-use clap::{Parser, command, Subcommand, Error};
+use clap::{Parser, command, Subcommand};
+use colored::Colorize;
 use dse::smdl::{TrkChunk, DSEEvent};
 use dse::smdl::events::{Other, PlayNote, FixedDurationPause};
 use dse::swdl::DSEString;
@@ -18,8 +19,8 @@ use dse::dtype::ReadWrite;
 #[path = "../binutils.rs"]
 mod binutils;
 use binutils::VERSION;
-use midly::Smf;
-use midly::num::u24;
+use midly::{Smf, TrackEvent};
+use midly::num::{u24, u4, u28};
 use crate::binutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, valid_file_of_type};
 
 #[derive(Parser)]
@@ -166,12 +167,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let smf_source = std::fs::read(&input_file_path)?;
                 let smf = Smf::parse(&smf_source)?;
-                match smf.header.format {
-                    midly::Format::SingleTrack => {  },
-                    _ => {
-                        panic!("Only single track MIDI files (with 16 channels or less) are currently supported!");
-                    },
-                };
                 let tpb = match smf.header.timing {
                     midly::Timing::Metrical(tpb) => tpb.as_int(),
                     _ => {
@@ -206,7 +201,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 smdl.song.tpqn = tpb;
 
                 // Fill in tracks
-                let midi_messages = &smf.tracks[0];
+                let midi_messages_combined: Vec<TrackEvent>;
+                let midi_messages = match smf.header.format {
+                    midly::Format::SingleTrack => { &smf.tracks[0] },
+                    midly::Format::Parallel => {
+                        println!("{}SMF1-type MIDI file detected! All MIDI tracks contained within will be mapped to MIDI channels and converted to SMF0!", "Warning: ".yellow());
+                        println!("{}This converter assumes that the first MIDI track encountered is dedicated solely for Meta events to follow convention.", "Warning: ".yellow());
+                        let mut first_track_is_meta: bool = true;
+                        for midi_msg in &smf.tracks[0] {
+                            match midi_msg.kind {
+                                midly::TrackEventKind::Midi { channel: _, message: _ } => {
+                                    // Track does not follow convention!
+                                    println!("{}SMF1 multi-track MIDI file contains note events in the first track! The first track is usually reserved only for meta events. It will be assumed that this MIDI file does not follow that convention.", "Warning: ".yellow());
+                                    first_track_is_meta = false;
+                                    break;
+                                },
+                                _ => {  }
+                            }
+                        }
+                        let mut midi_messages_tmp: Vec<(u128, TrackEvent)> = Vec::new();
+                        for (i, track) in smf.tracks.iter().enumerate() {
+                            let mut global_tick = 0;
+                            for midi_msg in track {
+                                global_tick += midi_msg.delta.as_int() as u128;
+                                // Overwrite MIDI message channel data to match track number!
+                                let mut midi_msg_edited = midi_msg.clone();
+                                if let midly::TrackEventKind::Midi { channel, message: _ } = &mut midi_msg_edited.kind {
+                                    let mapped_channel = if first_track_is_meta { i - 1 } else { i };
+                                    *channel = u4::try_from(u8::try_from(mapped_channel)?).ok_or(SMDLToolError::new("MIDI track number out of acceptable range for conversion from Smf1 to Smf0!"))?;
+                                }
+                                // Search to see where to insert the event
+                                let insert_position = midi_messages_tmp.binary_search_by_key(&global_tick, |&(k, _)| k);
+                                midi_messages_tmp.insert(match insert_position {
+                                    Ok(index) => index,
+                                    Err(index) => index
+                                }, (global_tick, midi_msg_edited));
+                            }
+                        }
+                        for i in 0..midi_messages_tmp.len() {
+                            let mut new_delta = 0;
+                            if i != 0 {
+                                let (previous_global_tick, _) = &midi_messages_tmp[i - 1];
+                                let (current_global_tick, _) = &midi_messages_tmp[i];
+                                new_delta = current_global_tick - previous_global_tick;
+                            }
+                            midi_messages_tmp[i].1.delta = u28::try_from(u32::try_from(new_delta)?).ok_or(SMDLToolError::new("Some notes are too far apart!"))?;
+                        }
+                        midi_messages_combined = midi_messages_tmp.into_iter().map(|(_, evt)| evt).collect();
+                        &midi_messages_combined
+                    },
+                    _ => {
+                        panic!("Only single track MIDI files (with 16 channels or less) are currently supported!");
+                    },
+                };
                 // Vec of TrkChunk's
                 let prgi_objects = &swdl.prgi.as_ref().expect("SWDL must contain a prgi chunk!").data.objects;
                 let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::new(i as u8, i as u8, swdl.header.unk1, swdl.header.unk2, prgi_objects[(i + prgi_objects.len() - 1) % prgi_objects.len()].header.id as u8).unwrap());
@@ -339,7 +386,8 @@ impl TrkChunkWriter {
     }
     pub fn note_on(&mut self, key: u8, vel: u8) -> Result<(), Box<dyn std::error::Error>> {
         if self.notes_held.contains_key(&key) {
-            panic!("Invalid MIDI file! Overlapping notes.");
+            println!("{}Overlapping notes detected! By default when there's note overlap a noteoff is sent immediately to avoid them.", "Warning: ".yellow());
+            self.note_off(key)?;
         }
         self.add_other_with_params_u8("SetTrackOctave", (key - 24) / 12 + 2)?;
         let mut evt = PlayNote::default();
