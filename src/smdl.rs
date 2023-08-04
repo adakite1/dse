@@ -19,7 +19,7 @@ const fn serde_use_common_values_for_unknowns<T>(_: &T) -> bool {
 
 //// NOTE: Any struct fields starting with an _ indicates that that struct field will be ignored when writing, with its appropriate value generate on-the-fly based on the other fields
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Reflect, Serialize, Deserialize)]
 pub struct SMDLHeader {
     #[serde(default = "GenericDefaultU32::<0x6C646D73>::value")]
     #[serde(skip_serializing)]
@@ -74,9 +74,35 @@ pub struct SMDLHeader {
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk9: u32, // Unknown, usually 0xFFFFFFFF
 }
+impl Default for SMDLHeader {
+    fn default() -> Self {
+        SMDLHeader {
+            magicn: 0x6C646D73,
+            unk7: 0,
+            flen: 0,
+            version: 0x415,
+            unk1: 0,
+            unk2: 0,
+            unk3: 0,
+            unk4: 0,
+            year: 0,
+            month: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            centisecond: 0,
+            fname: DSEString::<0xFF>::default(),
+            unk5: 0x1,
+            unk6: 0x1,
+            unk8: 0xFFFFFFFF,
+            unk9: 0xFFFFFFFF
+        }
+    }
+}
 impl AutoReadWrite for SMDLHeader {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Reflect, Serialize, Deserialize)]
 pub struct SongChunk {
     #[serde(default = "GenericDefaultU32::<0x676E6F73>::value")]
     #[serde(skip_serializing)]
@@ -136,6 +162,29 @@ pub struct SongChunk {
     #[serde(skip_serializing)]
     pub unkpad: [u8; 16], // unknown sequence of 16 0xFF bytes
 }
+impl Default for SongChunk {
+    fn default() -> Self {
+        SongChunk {
+            label: 0x676E6F73,
+            unk1: 0x01000000,
+            unk2: 0x0000FF10,
+            unk3: 0xFFFFFFB0,
+            unk4: 0x1,
+            tpqn: 0,
+            unk5: 0xFF01,
+            nbtrks: 0,
+            nbchans: 0,
+            unk6: 0x0F000000,
+            unk7: 0xFFFFFFFF,
+            unk8: 0x40000000,
+            unk9: 0x00404000,
+            unk10: 0x0200,
+            unk11: 0x0800,
+            unk12: 0xFFFFFF00,
+            unkpad: [0xFF; 16]
+        }
+    }
+}
 impl AutoReadWrite for SongChunk {  }
 
 #[derive(Debug, Reflect, Serialize, Deserialize)]
@@ -193,7 +242,7 @@ pub struct TrkChunkPreamble {
 }
 impl AutoReadWrite for TrkChunkPreamble {  }
 
-mod events {
+pub mod events {
     use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
     use phf::phf_ordered_map;
     use serde::{Serialize, Deserialize};
@@ -202,13 +251,13 @@ mod events {
 
     #[derive(Debug, Default, Serialize, Deserialize)]
     pub struct PlayNote {
-        velocity: u8,
+        pub velocity: u8,
         #[serde(default)]
         #[serde(skip_serializing)]
         _nbparambytes: u8,
-        octavemod: u8,
-        note: u8,
-        keydownduration: u32
+        pub octavemod: u8,
+        pub note: u8,
+        pub keydownduration: u32
     }
     impl ReadWrite for PlayNote {
         fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
@@ -383,36 +432,39 @@ mod events {
     mod named {
         use serde::{Serializer, Deserializer, Serialize, Deserialize};
 
-        use crate::dtype::GenericError;
-
-        use super::CODE_TRANSLATIONS;
+        use super::Other;
 
         pub fn serialize<S: Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
-            let (name, &(_, _, _)) = CODE_TRANSLATIONS.index(*v as usize - 0x90).ok_or(GenericError::new("Invalid 'Other' event, code is not within acceptable range!")).map_err(serde::ser::Error::custom)?;
+            let (name, &(_, _, _)) = Other::lookup(*v).map_err(serde::ser::Error::custom)?;
             name.to_string().serialize(s)
         }
         
         pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
-            let name = String::deserialize(d)?;
-            if let Some(&(_, code, _)) = CODE_TRANSLATIONS.get(&name) {
-                Ok(code)
-            } else if let Ok(code_u8) = name.parse::<u8>() {
-                Ok(code_u8)
-            } else if let Ok(code_u8) = u8::from_str_radix(name.trim_start_matches("0x"), 16) {
-                Ok(code_u8)
-            } else {
-                Err(serde::de::Error::custom("invalid 'Other' event code!"))
-            }
+            Other::name_to_code(&String::deserialize(d)?).map_err(serde::de::Error::custom)
         }
     }
     #[derive(Debug, Default, Serialize, Deserialize)]
     pub struct Other {
         #[serde(rename = "@code")]
         #[serde(with = "named")]
-        code: u8,
-        parameters: [u8; 5]
+        pub code: u8,
+        pub parameters: [u8; 5]
     }
     impl Other {
+        pub fn lookup(v: u8) -> Result<(&'static &'static str, &'static (bool, u8, u8)), GenericError> {
+            CODE_TRANSLATIONS.index(v as usize - 0x90).ok_or(GenericError::new("Invalid 'Other' event, code is not within acceptable range!"))
+        }
+        pub fn name_to_code(name: &str) -> Result<u8, Box<dyn std::error::Error>> {
+            if let Some(&(_, code, _)) = CODE_TRANSLATIONS.get(name) {
+                Ok(code)
+            } else if let Ok(code_u8) = name.parse::<u8>() {
+                Ok(code_u8)
+            } else if let Ok(code_u8) = u8::from_str_radix(name.trim_start_matches("0x"), 16) {
+                Ok(code_u8)
+            } else {
+                Err(Box::new(GenericError::new("invalid 'Other' event name!")))
+            }
+        }
         pub fn is_eot_event(&self) -> bool {
             self.code == 0x98
         }
@@ -630,12 +682,20 @@ pub struct SMDL {
 }
 impl SMDL {
     pub fn regenerate_read_markers(&mut self) -> Result<(), Box<dyn std::error::Error>> { //TODO: make more efficient
+        // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
         self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
         self.song.nbtrks = self.trks.len() as u8;
         self.song.nbchans = self.trks.objects.iter().map(|x| x.preamble.chanid).max().ok_or(GenericError::new("SMDL file contains zero tracks! Unable to automatically determine number of channels used!!"))? + 1;
         for trk in self.trks.objects.iter_mut() {
             trk.header.chunklen = trk.preamble.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32 + trk.events.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
         }
+        // ======== CHUNK LABELS ========
+        self.header.magicn = 0x6C646D73;  //  The 4 characters "smdl" {0x73,0x6D,0x64,0x6C} 
+        self.song.label = 0x676E6F73; // Song chunk label "song" {0x73,0x6F,0x6E,0x67}
+        for obj in self.trks.objects.iter_mut() {
+            obj.header.label = 0x206B7274; // track chunk label "trk\0x20" {0x74,0x72,0x6B,0x20}
+        }
+        self.eoc.label = 0x20636F65; // the ChunkID -  The chunk ID "eoc\0x20" {0x65, 0x6F, 0x63, 0x20} 
         Ok(())
     }
 }
