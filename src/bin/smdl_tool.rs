@@ -66,6 +66,10 @@ enum Commands {
         
         #[arg(long)]
         fname: Option<String>,
+
+        /// Map Program Change and CC0 Bank Select events to DSE SWDL program id's
+        #[arg(short = 'M', long, action)]
+        midi_prgch: bool,
     }
 }
 
@@ -120,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nAll files successfully processed.");
         },
-        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, fname } => {
+        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, fname, midi_prgch } => {
             let (source_file_format, change_ext) = ("mid", "smd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
@@ -284,6 +288,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 midly::MidiMessage::Controller { controller, value } => {
                                     trks[channel_i].fix_current_global_tick(global_tick)?;
                                     match controller.as_int() {
+                                        00 => { // CC00 Bank Select MSB
+                                            if *midi_prgch {
+                                                trks[channel_i].bank_select(value.as_int())?;
+                                            }
+                                        },
                                         07 => { // CC07 Volume MSB
                                             trks[channel_i].add_other_with_params_u8("SetTrackVolume", value.as_int())?;
                                         },
@@ -296,7 +305,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         _ => { /* Ignore the other controllers for now */ }
                                     }
                                 },
-                                midly::MidiMessage::ProgramChange { program } => { /* Ignore program change since the range is way too small 0-127 */ },
+                                midly::MidiMessage::ProgramChange { program } => {
+                                    trks[channel_i].fix_current_global_tick(global_tick)?;
+                                    if *midi_prgch {
+                                        trks[channel_i].program_change(program.as_int())?;
+                                    }
+                                },
                                 midly::MidiMessage::ChannelAftertouch { vel } => { /* Ignore channel aftertouch events */ },
                                 midly::MidiMessage::PitchBend { bend } => { /* Ignore pitchbend events */ },
                             }
@@ -365,14 +379,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 pub struct TrkChunkWriter {
     current_global_tick: u128,
     trk: TrkChunk,
-    notes_held: HashMap<u8, (usize, u128)>
+    notes_held: HashMap<u8, (usize, u128)>,
+    bank: u8,
+    program: u8
 }
 impl TrkChunkWriter {
     pub fn new(trkid: u8, chanid: u8, unk1: u8, unk2: u8, default_program: u8) -> Result<TrkChunkWriter, Box<dyn std::error::Error>> {
         let mut trk = TrkChunk::default();
         trk.preamble.trkid = trkid;
         trk.preamble.chanid = chanid;
-        let mut trk_chunk_writer = TrkChunkWriter { current_global_tick: 0, trk, notes_held: HashMap::new() };
+        let mut trk_chunk_writer = TrkChunkWriter { current_global_tick: 0, trk, notes_held: HashMap::new(), bank: 0, program: 0 };
 
         // Fill in some standard events
         trk_chunk_writer.add_other_with_params_u8("SetTrackExpression", 100)?; // Random value for now
@@ -383,6 +399,14 @@ impl TrkChunkWriter {
         }
 
         Ok(trk_chunk_writer)
+    }
+    pub fn bank_select(&mut self, bank: u8) -> Result<(), Box<dyn std::error::Error>> {
+        self.bank = bank;
+        self.add_other_with_params_u8("SetProgram", self.bank * 128 + self.program)
+    }
+    pub fn program_change(&mut self, prgm: u8) -> Result<(), Box<dyn std::error::Error>> {
+        self.program = prgm;
+        self.add_other_with_params_u8("SetProgram", self.bank * 128 + self.program)
     }
     pub fn note_on(&mut self, key: u8, vel: u8) -> Result<(), Box<dyn std::error::Error>> {
         if self.notes_held.contains_key(&key) {
