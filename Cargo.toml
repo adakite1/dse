@@ -17,3 +17,5 @@ phf = { version = "0.11.2", features = ["macros"] }
 midly = "0.5.3"
 chrono = "0.4.26"
 colored = "2"
+soundfont = "0.0.2"
+dse-dsp-sys = { git = "https://github.com/adakite1/dse-dsp-sys.git" }

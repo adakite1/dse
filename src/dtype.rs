@@ -321,6 +321,13 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
             self.objects.len()
         }
     }
+    pub fn last(&self) -> Option<&T> {
+        if let Some(_) = self.objects[0].is_self_indexed() {
+            self.objects.iter().map(|x| (x, x.is_self_indexed().unwrap())).max_by_key(|x| x.1).map(|x| x.0)
+        } else {
+            self.objects.last()
+        }
+    }
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTable<T> {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
