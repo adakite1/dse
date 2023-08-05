@@ -6,6 +6,13 @@ use serde::{Serialize, Deserialize};
 
 use crate::swdl::{ADSRVolumeEnvelope, DSEString};
 
+#[repr(i8)]
+pub enum DSEPan {
+    FullLeft = 0,
+    Middle = 64,
+    FullRight = 127
+}
+
 macro_rules! read_n_bytes {
     ($file:ident, $n:literal) => {{
         let mut buf: [u8; $n] = [0; $n];

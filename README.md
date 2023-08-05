@@ -45,7 +45,7 @@ The binaries will be in `target/[debug or release]`.
 `.\smdl_tool.exe from-midi .\midi_export.mid ./bgm0043.swd`
 
 **A quick note on the MIDI conversion functionality:**
-- The MIDI file must be of type `smf0`! (A single track, 16 channels)
+- The MIDI file must be of type `smf0` or, in the case of `smf1`, be composed of 16 MIDI tracks or lower! (Not counting any meta event tracks at the very start if your music composition software exports those)
 - Currently, the instruments are mapped automatically to the entries in the `prgi` chunk of the provided SWD file, channel number <=> index in the `prgi` chunk
 - P.s., you can also just put in the `SWD.XML` file directly into that command and it should still work
 - CC07 Volume, CC10 Pan Position, and CC11 Expression are the currently supported MIDI CC controllers; they're mapped to their SMDL equivalents

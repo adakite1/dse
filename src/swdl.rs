@@ -70,7 +70,7 @@ impl<'de, const U: u8> Deserialize<'de> for DSEString<U> {
     }
 }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Reflect, Serialize, Deserialize)]
 pub struct SWDLHeader {
     /// Note: 4-bytes represented as one u32
     #[serde(default = "GenericDefaultU32::<0x6C647773>::value")]
@@ -149,6 +149,38 @@ pub struct SWDLHeader {
     #[serde(skip_serializing)]
     pub wavilen: u32
 }
+impl Default for SWDLHeader {
+    fn default() -> Self {
+        SWDLHeader {
+            magicn: 0x6C647773,
+            unk18: 0,
+            flen: 0,
+            version: 0x415,
+            unk1: 0x00, // Random value. These just need to match with the SWD file's corresponding SMD file.
+            unk2: 0xFF, // Random value. These just need to match with the SWD file's corresponding SMD file.
+            unk3: 0,
+            unk4: 0,
+            year: 0,
+            month: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            centisecond: 0,
+            fname: DSEString::<0xAA>::default(),
+            unk10: 0xAAAAAA00,
+            unk11: 0,
+            unk12: 0,
+            unk13: 0x10,
+            pcmdlen: 0,
+            unk14: 0,
+            nbwavislots: 0,
+            nbprgislots: 0,
+            unk17: 524, // I'm not sure what this is so I'll just use the value from bgm0001
+            wavilen: 0
+        }
+    }
+}
 impl AutoReadWrite for SWDLHeader {  }
 
 #[derive(Debug, Reflect, Serialize, Deserialize)]
@@ -183,7 +215,7 @@ impl Default for ChunkHeader {
 }
 impl AutoReadWrite for ChunkHeader {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct ADSRVolumeEnvelope {
     #[serde(rename = "@envon")]
     pub envon: bool, // Volume envelope on
@@ -222,9 +254,29 @@ pub struct ADSRVolumeEnvelope {
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk57: i8 // Usually 0xFF
 }
+impl Default for ADSRVolumeEnvelope {
+    fn default() -> Self {
+        ADSRVolumeEnvelope {
+            envon: false,
+            envmult: 0,
+            unk19: 0x1,
+            unk20: 0x3,
+            unk21: 0xFF03,
+            unk22: 0xFFFF,
+            atkvol: 0,
+            attack: 0,
+            decay: 0,
+            sustain: 0,
+            hold: 0,
+            decay2: 0,
+            release: 0,
+            unk57: -1
+        }
+    }
+}
 impl AutoReadWrite for ADSRVolumeEnvelope {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct SampleInfo {
     #[serde(default = "GenericDefaultU16::<0xAA01>::value")]
     #[serde(skip_serializing)]
@@ -300,6 +352,37 @@ pub struct SampleInfo {
     
     pub volume_envelope: ADSRVolumeEnvelope
 }
+impl Default for SampleInfo {
+    fn default() -> Self {
+        SampleInfo {
+            unk1: 0xAA01,
+            id: 0,
+            ftune: 0,
+            ctune: 0,
+            rootkey: 0,
+            ktps: 0,
+            volume: 0,
+            pan: 0,
+            unk5: 0x00,
+            unk58: 0x02,
+            unk6: 0x0000,
+            unk7: 0xAAAA,
+            unk59: 0x415,
+            smplfmt: 0x0100,
+            unk9: 0x09,
+            smplloop: false,
+            unk10: 0x0801,
+            unk11: 0x0400,
+            unk12: 0x0101,
+            unk13: 0,
+            smplrate: 0,
+            smplpos: 0,
+            loopbeg: 0,
+            looplen: 0,
+            volume_envelope: ADSRVolumeEnvelope::default()
+        }
+    }
+}
 impl IsSelfIndexed for SampleInfo {
     fn is_self_indexed(&self) -> Option<usize> {
         Some(self.id as usize)
@@ -311,7 +394,7 @@ impl IsSelfIndexed for SampleInfo {
 }
 impl AutoReadWrite for SampleInfo {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Reflect, Serialize, Deserialize)]
 pub struct ProgramInfoHeader {
     #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(rename = "@id")]
@@ -368,6 +451,25 @@ pub struct ProgramInfoHeader {
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub unk9: u8, // Most of the time is 0x0
 }
+impl Default for ProgramInfoHeader {
+    fn default() -> Self {
+        ProgramInfoHeader {
+            id: 0,
+            nbsplits: 0,
+            prgvol: 0,
+            prgpan: 0,
+            unk3: 0,
+            thatFbyte: 0x0F,
+            unk4: 0x200,
+            unk5: 0,
+            nblfos: 0,
+            PadByte: 0xAA,
+            unk7: 0,
+            unk8: 0,
+            unk9: 0
+        }
+    }
+}
 impl IsSelfIndexed for ProgramInfoHeader {
     fn is_self_indexed(&self) -> Option<usize> {
         Some(self.id as usize)
@@ -421,7 +523,7 @@ impl IsSelfIndexed for LFOEntry {
 }
 impl AutoReadWrite for LFOEntry {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Reflect, Serialize, Deserialize)]
 pub struct SplitEntry {
     #[serde(default)]
     #[serde(skip_serializing)]
@@ -506,6 +608,38 @@ pub struct SplitEntry {
     pub unk24: u16, // Usually the same value as "PadByte", or 0. Possibly padding?
     // After here, the last 16 bytes are for the volume enveloped. They override the sample's original volume envelope!
     pub volume_envelope: ADSRVolumeEnvelope
+}
+impl Default for SplitEntry {
+    fn default() -> Self {
+        SplitEntry {
+            unk10: 0,
+            id: 0,
+            unk11: 0x02,
+            unk25: 0x01,
+            lowkey: 0,
+            hikey: 0,
+            lowkey2: 0,
+            hikey2: 0,
+            lovel: 0,
+            hivel: 0,
+            lovel2: 0,
+            hivel2: 0,
+            unk16: 0,
+            unk17: 0,
+            SmplID: 0,
+            ftune: 0,
+            ctune: 0,
+            rootkey: 0,
+            ktps: 0,
+            smplvol: 0,
+            smplpan: 0,
+            kgrpid: 0x0,
+            unk22: 0x02,
+            unk23: 0,
+            unk24: 0,
+            volume_envelope: ADSRVolumeEnvelope::default()
+        }
+    }
 }
 impl IsSelfIndexed for SplitEntry {
     fn is_self_indexed(&self) -> Option<usize> {

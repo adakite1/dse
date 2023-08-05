@@ -21,7 +21,7 @@ mod binutils;
 use binutils::VERSION;
 use midly::{Smf, TrackEvent};
 use midly::num::{u24, u4, u28};
-use crate::binutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, valid_file_of_type};
+use crate::binutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, valid_file_of_type, get_file_last_modified_date_with_default};
 
 #[derive(Parser)]
 #[command(author = "Adakite", version = VERSION, about = "Tools for working with SMDL and SMDL.XML files", long_about = None)]
@@ -63,9 +63,6 @@ enum Commands {
         /// Sets the folder to output the encoded files
         #[arg(short = 'o', long, value_name = "OUTPUT")]
         output_folder: Option<PathBuf>,
-        
-        #[arg(long)]
-        fname: Option<String>,
 
         /// Map Program Change and CC0 Bank Select events to DSE SWDL program id's
         #[arg(short = 'M', long, action)]
@@ -124,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nAll files successfully processed.");
         },
-        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, fname, midi_prgch } => {
+        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, midi_prgch } => {
             let (source_file_format, change_ext) = ("mid", "smd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
@@ -139,36 +136,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 swdl.regenerate_read_markers()?;
                 swdl.regenerate_automatic_parameters()?;
             } else {
-                return Err(Box::new(SMDLToolError::new("Provided SWD file is not a SWD file!")));
+                return Err(Box::new(SMDLToolError::new("Provided SWD file is not an SWD file!")));
             }
 
             for (input_file_path, output_file_path) in input_file_paths {
                 print!("Converting {}... ", input_file_path.display());
 
                 // Open input MIDI file
-                let smf_metadata = std::fs::metadata(&input_file_path)?;
-                let (year, month, day, hour, minute, second, centisecond) = if let Ok(time) = smf_metadata.modified() {
-                    let dt: DateTime<Local> = time.into();
-                    (
-                        dt.year() as u16,
-                        dt.month() as u8,
-                        dt.day() as u8,
-                        dt.hour() as u8,
-                        dt.minute() as u8,
-                        dt.second() as u8,
-                        (dt.nanosecond() / 10_u32.pow(7)) as u8
-                    )
-                } else {
-                    (
-                        2008,
-                        11,
-                        16,
-                        13,
-                        40,
-                        57,
-                        3
-                    )
-                };
+                let (year, month, day, hour, minute, second, centisecond) = get_file_last_modified_date_with_default(&input_file_path)?;
                 let smf_source = std::fs::read(&input_file_path)?;
                 let smf = Smf::parse(&smf_source)?;
                 let tpb = match smf.header.timing {
@@ -177,11 +152,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         panic!("Only ticks/beat is supported currently as a timing specifier!");
                     }
                 };
-                let mut fname = fname.clone().unwrap_or(input_file_path.file_name().ok_or(SMDLToolError::new(&format!("Couldn't obtain filename of MIDI file with path {}!", input_file_path.display())))?
+                let mut fname = input_file_path.file_name().ok_or(SMDLToolError::new(&format!("Couldn't obtain filename of MIDI file with path {}!", input_file_path.display())))?
                     .to_str().ok_or(SMDLToolError::new(&format!("Couldn't convert filename for MIDI file with path {} into a UTF-8 Rust String. Filenames should be pure-ASCII only!", input_file_path.display())))?
-                    .to_string());
+                    .to_string();
                 if !fname.is_ascii() {
-                    panic!("`fname` must be ASCII-only!");
+                    panic!("Filenames must be ASCII-only!");
                 }
                 fname.truncate(15);
                 let fname = DSEString::<0xFF>::try_from(fname)?;
@@ -413,7 +388,7 @@ impl TrkChunkWriter {
             println!("{}Overlapping notes detected! By default when there's note overlap a noteoff is sent immediately to avoid them.", "Warning: ".yellow());
             self.note_off(key)?;
         }
-        self.add_other_with_params_u8("SetTrackOctave", (key - 24) / 12 + 2)?;
+        self.add_other_with_params_u8("SetTrackOctave", (key - 24) / 12 + 2)?; // An extra octave is added since by default pretty much every patch in the game default to -7 ctune
         let mut evt = PlayNote::default();
         evt.velocity = vel;
         evt.octavemod = 2;
