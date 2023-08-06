@@ -16,6 +16,7 @@ use dse::dtype::ReadWrite;
 mod binutils;
 use binutils::{VERSION, valid_file_of_type};
 use dse_dsp_sys::process_mono;
+use phf::phf_map;
 use soundfont::{SoundFont2, Zone};
 use crate::binutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, get_file_last_modified_date_with_default};
 
@@ -71,6 +72,14 @@ enum Commands {
         /// Samples with a higher sample rate than the `resample_threshold` will be resampled at this sample rate
         #[arg(short = 'S', long, default_value_t = 22050)]
         sample_rate: u32,
+
+        /// The sample-rate adjustment curve to use.
+        /// 1 - Ideal sample correction for fixed 32728.5Hz hardware output rate
+        /// 2 - Discrete lookup table based on the original EoS main bank (all samples must either match the `sample_rate` parameter *or* be converted to that sample rate in this mode!)
+        /// 3 - Fitted curve
+        /// 4 - Ideal sample correction minus 100 cents (1 semitone)
+        #[arg(short = 'C', long, default_value_t = 4)]
+        sample_rate_adjustment_curve: usize
     }
 }
 
@@ -126,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nAll files successfully processed.");
         }
-        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate } => {
+        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
@@ -172,8 +181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // ID
                     sample_info.id = (first_available_id + i) as u16;
 
-                    sample_info.ftune = sample_header.pitchadj;
-                    sample_info.ctune = -7;
+                    sample_info.smplrate = sample_header.sample_rate;
+                    // let (ctune, ftune) = sample_rate_adjustment_2(sample_info.smplrate as f64)?;
+                    // sample_info.ftune = ftune + sample_header.pitchadj;
+                    // sample_info.ctune = ctune;
                     if sample_header.origpitch >= 128 { // origpitch - 255 is reserved for percussion by convention, 128-254 is invalid, but either way the SF2 standard recommends defaulting to 60 when 128-255 is encountered.
                         sample_info.rootkey = 60;
                     } else {
@@ -183,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sample_info.pan = 64; // SF2 does not have a pan parameter per sample, and any panning work related to stereo samples are relegated to the Instruments layer anyways
                     sample_info.smplfmt = 0x0200; // SF2 supports 16-bit PCM and 24-bit PCM, and while DSE also supports 16-bit PCM, the problem comes with file size. 16-bit PCM is **massive**, and so it's very hard to fit many samples into the limited memory of the NDS, which could explain the abundant use of 4-bit ADPCM in the original game songs. With that in mind, here we will internally encode the sample data as ADPCM, and on top of that, lower the sample rate if necessary to compress the sample data as much as we possibly can.
                     sample_info.smplloop = !(sample_header.loop_start == 0 && sample_header.loop_end == 0); // SF2 does not seem to have a direct parameter for not looping. This seems to be it.
-                    sample_info.smplrate = sample_header.sample_rate;
+                    // smplrate is up above with ctune and ftune
                     // smplpos is at the bottom
                     sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
                     sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
@@ -202,8 +213,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sample_header.sample_rate as f64
                         };
                         let raw_sample_data_len = raw_sample_data.len();
-                        let (raw_sample_data, new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
+                        let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
+                        if new_loop_start == 4 {
+                            new_loop_start = 0;
+                        }
                         sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
+                        let (ctune, ftune) = sample_rate_adjustment(new_sample_rate, *sample_rate_adjustment_curve)?;
+                        sample_info.ftune = ftune + sample_header.pitchadj;
+                        sample_info.ctune = ctune;
                         sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
                         sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
 
@@ -287,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // ID
                     program_info.header.id = preset.header.bank * 128 + preset.header.preset;
-                    program_info.header.prgvol = 100;
+                    program_info.header.prgvol = 60;
                     program_info.header.prgpan = 64;
                     program_info.header.PadByte = 170;
 
@@ -364,9 +381,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     /// Function to apply data from a zone to a split
-                    fn apply_zone_data_to_split(split_entry: &mut SplitEntry, zone: &Zone, first_available_id: usize) {
+                    fn apply_zone_data_to_split(split_entry: &mut SplitEntry, zone: &Zone, other_zone: &Zone, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) {
                         // Loop through all the generators in this zone
-                        let (mut attack, mut hold, mut decay, mut release) = (0, 0, 0, 0);
+                        let (mut attack, mut hold, mut decay, mut release) = (
+                            other_zone.gen_list
+                                .iter()
+                                .find(|g| g.ty == soundfont::data::GeneratorType::AttackVolEnv)
+                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                            other_zone.gen_list
+                                .iter()
+                                .find(|g| g.ty == soundfont::data::GeneratorType::HoldVolEnv)
+                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                            other_zone.gen_list
+                                .iter()
+                                .find(|g| g.ty == soundfont::data::GeneratorType::DecayVolEnv)
+                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                            other_zone.gen_list
+                                .iter()
+                                .find(|g| g.ty == soundfont::data::GeneratorType::ReleaseVolEnv)
+                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                        );
                         for gen in zone.gen_list.iter() {
                             match gen.ty {
                                 soundfont::data::GeneratorType::StartAddrsOffset => {  },
@@ -447,10 +481,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 soundfont::data::GeneratorType::Reserved2 => {  },
                                 soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
                                 soundfont::data::GeneratorType::CoarseTune => {
-                                    split_entry.ctune = *gen.amount.as_i16().unwrap() as i8 - 7;
+                                    let smpl;
+                                    if let Some(&sample_i) = zone.sample() {
+                                        smpl = &sample_infos[sample_i as usize];
+                                    } else if let Some(&sample_i) = other_zone.sample() {
+                                        smpl = &sample_infos[sample_i as usize];
+                                    } else {
+                                        println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
+                                        continue;
+                                    }
+                                    let (ctune, _) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
+                                    split_entry.ctune = *gen.amount.as_i16().unwrap() as i8 + ctune;
                                 },
                                 soundfont::data::GeneratorType::FineTune => {
-                                    split_entry.ftune = *gen.amount.as_i16().unwrap() as i8;
+                                    let smpl;
+                                    if let Some(&sample_i) = zone.sample() {
+                                        smpl = &sample_infos[sample_i as usize];
+                                    } else if let Some(&sample_i) = other_zone.sample() {
+                                        smpl = &sample_infos[sample_i as usize];
+                                    } else {
+                                        println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
+                                        continue;
+                                    }
+                                    let (_, ftune) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
+                                    split_entry.ftune = *gen.amount.as_i16().unwrap() as i8 + ftune;
                                 },
                                 soundfont::data::GeneratorType::SampleID => {
                                     // Check if the zone specifies which sample we have to use!
@@ -486,7 +540,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     /// Function to create splits from zones
-                    fn create_splits_from_zones(preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &Vec<SampleInfo>, first_available_id: usize) -> Vec<SplitEntry> {
+                    fn create_splits_from_zones(preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> Vec<SplitEntry> {
                         let mut splits = Vec::with_capacity(instrument_zones.len());
                         for instrument_zone in instrument_zones {
                             let mut split = SplitEntry::default();
@@ -508,8 +562,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             split.smplpan = 64;
                             split.kgrpid = 0;
                             split.volume_envelope = smpl.volume_envelope.clone();
-                            apply_zone_data_to_split(&mut split, preset_zone, first_available_id);
-                            apply_zone_data_to_split(&mut split, instrument_zone, first_available_id);
+                            apply_zone_data_to_split(&mut split, preset_zone, instrument_zone, sample_infos, first_available_id, sample_rate_adjustment_curve);
+                            apply_zone_data_to_split(&mut split, instrument_zone, preset_zone, sample_infos, first_available_id, sample_rate_adjustment_curve);
                             splits.push(split);
                         }
                         splits
@@ -519,7 +573,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let splits: Vec<SplitEntry> = preset.zones.iter().map(|preset_zone| {
                         if let Some(&instrument_i) = preset_zone.instrument() {
                             let instrument = &sf2.instruments[instrument_i as usize];
-                            create_splits_from_zones(preset_zone, &instrument.zones, &track_swdl.wavi.data.objects, first_available_id)
+                            create_splits_from_zones(preset_zone, &instrument.zones, &track_swdl.wavi.data.objects, first_available_id, *sample_rate_adjustment_curve)
                         } else {
                             println!("{}Some preset zones contain no instruments!", "Warning: ".yellow());
                             Vec::new()
@@ -569,6 +623,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+pub fn sample_rate_adjustment_in_cents(sample_rate: f64) -> f64 {
+    ((sample_rate - 1115.9471180474397) / 31832.602532753794).ln() / 0.0005990154279493774
+}
+pub fn cents_to_ctune_ftune(mut cents: i64) -> (i8, i8) {
+    let mut sign = 1;
+    if cents == 0 {
+        return (0, 0);
+    } else if cents < 0 {
+        sign = -1;
+    }
+    cents = cents.abs();
+
+    let mut ctune = 0;
+    let mut ftune = cents;
+    while ftune >= 100 {
+        ftune -= 100;
+        ctune += 1;
+    }
+    (sign * ctune as i8, sign * ftune as i8)
+}
+pub fn sample_rate_adjustment_3(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+    Ok(cents_to_ctune_ftune(sample_rate_adjustment_in_cents(sample_rate) as i64))
+}
+pub fn sample_rate_adjustment_1(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+    Ok(cents_to_ctune_ftune((1200.0 * (sample_rate / 32728.5).log2()).round() as i64))
+}
+pub fn sample_rate_adjustment_4(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+    Ok(cents_to_ctune_ftune((1200.0 * (sample_rate / 32728.5).log2()).round() as i64 - 100))
+}
+static SAMPLE_RATE_ADJUSTMENT_TABLE: phf::Map<u32, i64> = phf_map! {
+    8000_u32 => -2600_i64,	11025_u32 => -1858_i64,	11031_u32 => -1856_i64,	11069_u32 => -1841_i64,	
+    11281_u32 => -2013_i64,	14000_u32 => -1424_i64,	14002_u32 => -1423_i64,	14003_u32 => -1423_i64,	
+    14004_u32 => -1422_i64,	14007_u32 => -1421_i64,	14008_u32 => -1421_i64,	16000_u32 => -1400_i64,	
+    16002_u32 => -1399_i64,	16004_u32 => -1399_i64,	16006_u32 => -1398_i64,	16008_u32 => -1397_i64,	
+    16011_u32 => -1397_i64,	16013_u32 => -1396_i64,	16014_u32 => -1396_i64,	16015_u32 => -1396_i64,	
+    16016_u32 => -1395_i64,	16019_u32 => -1394_i64,	16020_u32 => -1394_i64,	16034_u32 => -1390_i64,	
+    18000_u32 => -1190_i64,	18001_u32 => -1189_i64,	18003_u32 => -1189_i64,	20000_u32 => -779_i64,	
+    22021_u32 => -664_i64,	22030_u32 => -662_i64,	22050_u32 => -658_i64,	22051_u32 => -658_i64,	
+    22052_u32 => -658_i64,	22053_u32 => -658_i64,	22054_u32 => -657_i64,	22055_u32 => -657_i64,	
+    22057_u32 => -657_i64,	22058_u32 => -657_i64,	22059_u32 => -656_i64,	22061_u32 => -656_i64,	
+    22062_u32 => -656_i64,	22063_u32 => -656_i64,	22064_u32 => -655_i64,	22066_u32 => -655_i64,	
+    22068_u32 => -655_i64,	22069_u32 => -654_i64,	22071_u32 => -654_i64,	22073_u32 => -654_i64,	
+    22074_u32 => -653_i64,	22075_u32 => -653_i64,	22076_u32 => -653_i64,	22077_u32 => -653_i64,	
+    22078_u32 => -653_i64,	22079_u32 => -652_i64,	22081_u32 => -652_i64,	22082_u32 => -652_i64,	
+    22084_u32 => -651_i64,	22085_u32 => -651_i64,	22086_u32 => -651_i64,	22087_u32 => -651_i64,	
+    22088_u32 => -651_i64,	22092_u32 => -650_i64,	22093_u32 => -650_i64,	22099_u32 => -648_i64,	
+    22102_u32 => -648_i64,	22106_u32 => -647_i64,	22108_u32 => -647_i64,	22112_u32 => -646_i64,	
+    22115_u32 => -645_i64,	22121_u32 => -644_i64,	22122_u32 => -644_i64,	22124_u32 => -643_i64,	
+    22132_u32 => -642_i64,	22133_u32 => -642_i64,	22142_u32 => -640_i64,	22148_u32 => -639_i64,	
+    22151_u32 => -638_i64,	22154_u32 => -637_i64,	22158_u32 => -637_i64,	22160_u32 => -636_i64,	
+    22167_u32 => -635_i64,	22171_u32 => -634_i64,	22179_u32 => -632_i64,	22180_u32 => -632_i64,	
+    22186_u32 => -631_i64,	22189_u32 => -630_i64,	22196_u32 => -629_i64,	22201_u32 => -628_i64,	
+    22202_u32 => -628_i64,	22213_u32 => -626_i64,	22223_u32 => -624_i64,	22226_u32 => -623_i64,	
+    22260_u32 => -616_i64,	22276_u32 => -613_i64,	22282_u32 => -612_i64,	22349_u32 => -599_i64,	
+    22400_u32 => -588_i64,	22406_u32 => -587_i64,	22450_u32 => -579_i64,	22508_u32 => -823_i64,	
+    22828_u32 => -761_i64,	22932_u32 => -740_i64,	22963_u32 => -734_i64,	23000_u32 => -727_i64,	
+    23100_u32 => -708_i64,	24000_u32 => -695_i64,	24011_u32 => -693_i64,	24014_u32 => -692_i64,	
+    24054_u32 => -685_i64,	25200_u32 => -378_i64,	26000_u32 => -396_i64,	26059_u32 => -386_i64,	
+    32000_u32 => -200_i64,	32001_u32 => -200_i64,	32004_u32 => -199_i64,	32005_u32 => -199_i64,	
+    32012_u32 => -198_i64,	32024_u32 => -196_i64,	32033_u32 => -195_i64,	32034_u32 => -195_i64,	
+    32044_u32 => -194_i64,	32057_u32 => -192_i64,	32065_u32 => -191_i64,	32105_u32 => -185_i64,	
+    32114_u32 => -184_i64,	32136_u32 => -181_i64,	44100_u32 => 542_i64,	44102_u32 => 542_i64,	
+    44103_u32 => 542_i64,	44110_u32 => 543_i64,	44112_u32 => 543_i64,	44131_u32 => 545_i64,	
+    44132_u32 => 545_i64,	44177_u32 => 549_i64,	44182_u32 => 550_i64,	44210_u32 => 553_i64,	
+    44225_u32 => 554_i64,	44249_u32 => 557_i64,	44539_u32 => 586_i64,	45158_u32 => 391_i64,	
+    45264_u32 => 401_i64,	45656_u32 => 439_i64
+};
+pub fn sample_rate_adjustment_2(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+    let smplrate = sample_rate.round() as u32;
+    if let Some(&cents) = SAMPLE_RATE_ADJUSTMENT_TABLE.get(&smplrate) {
+        println!("{:?}", cents_to_ctune_ftune(cents));
+        Ok(cents_to_ctune_ftune(cents))
+    } else {
+        Err(SWDLToolError::new("Target sample rate unsupported! Cannot determine its adjustment value!!"))
+    }
+}
+pub fn sample_rate_adjustment(sample_rate: f64, curve: usize) -> Result<(i8, i8), SWDLToolError> {
+    match curve {
+        1 => sample_rate_adjustment_1(sample_rate),
+        2 => sample_rate_adjustment_2(sample_rate),
+        3 => sample_rate_adjustment_3(sample_rate),
+        4 => sample_rate_adjustment_4(sample_rate),
+        _ => Err(SWDLToolError::new("Invalid sample rate adjustment curve number!"))
+    }
 }
 
 // https://projectpokemon.org/docs/mystery-dungeon-nds/dse-swdl-format-r14/#SWDL_Header
