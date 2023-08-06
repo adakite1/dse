@@ -1,4 +1,5 @@
 use core::panic;
+use std::ffi::c_int;
 /// Example: .\swdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.swd -o unpack
 /// Example: .\swdl_tool.exe from-xml .\unpack\*.swd.xml -o .\NDS_UNPACK\data\SOUND\BGM\
 
@@ -79,7 +80,11 @@ enum Commands {
         /// 3 - Fitted curve
         /// 4 - Ideal sample correction minus 100 cents (1 semitone)
         #[arg(short = 'C', long, default_value_t = 4)]
-        sample_rate_adjustment_curve: usize
+        sample_rate_adjustment_curve: usize,
+
+        /// The lookahead for the ADPCM encoding process. A higher value allows the encoder to look further into the future to find the optimum coding sequence for the file. Default is 3, but experimentation with higher values is recommended.
+        #[arg(short = 'l', long, default_value_t = 3)]
+        adpcm_encoder_lookahead: c_int,
     }
 }
 
@@ -135,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nAll files successfully processed.");
         }
-        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve } => {
+        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
@@ -213,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sample_header.sample_rate as f64
                         };
                         let raw_sample_data_len = raw_sample_data.len();
-                        let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
+                        let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, *adpcm_encoder_lookahead, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
                         if new_loop_start == 4 {
                             new_loop_start = 0;
                         }
