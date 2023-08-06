@@ -265,6 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match controller.as_int() {
                                         00 => { // CC00 Bank Select MSB
                                             if *midi_prgch {
+                                                println!("{}", "Found --midi-prgch flag! Processing bank select message.".green());
                                                 trks[channel_i].bank_select(value.as_int())?;
                                             }
                                         },
@@ -283,6 +284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 midly::MidiMessage::ProgramChange { program } => {
                                     trks[channel_i].fix_current_global_tick(global_tick)?;
                                     if *midi_prgch {
+                                        println!("{}", "Found --midi-prgch flag! Processing program change message.".green());
                                         trks[channel_i].program_change(program.as_int())?;
                                     }
                                 },

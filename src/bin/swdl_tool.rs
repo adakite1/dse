@@ -17,8 +17,6 @@ mod binutils;
 use binutils::{VERSION, valid_file_of_type};
 use dse_dsp_sys::process_mono;
 use soundfont::{SoundFont2, Zone};
-use symphonia::core::codecs::CodecRegistry;
-use symphonia::default::get_codecs;
 use crate::binutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, get_file_last_modified_date_with_default};
 
 #[derive(Parser)]
@@ -65,6 +63,14 @@ enum Commands {
         /// Sets the path to output the patched main bank SWDL file
         #[arg(value_name = "SWDL_MAIN_BANK_OUT")]
         out_swdl: Option<PathBuf>,
+
+        /// If a sample has a sample rate above this, it will be resampled to the sample rate specified in `sample_rate`
+        #[arg(short = 't', long, default_value_t = 25000)]
+        resample_threshold: u32,
+
+        /// Samples with a higher sample rate than the `resample_threshold` will be resampled at this sample rate
+        #[arg(short = 'S', long, default_value_t = 22050)]
+        sample_rate: u32,
     }
 }
 
@@ -120,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nAll files successfully processed.");
         }
-        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path } => {
+        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
@@ -175,28 +181,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     sample_info.volume = 127; // SF2 does not have a volume parameter per sample
                     sample_info.pan = 64; // SF2 does not have a pan parameter per sample, and any panning work related to stereo samples are relegated to the Instruments layer anyways
-                    sample_info.smplfmt = 0x0100; // SF2 supports 16-bit PCM and 24-bit PCM, DSE supports only 16-bit PCM, so we'll set it to that here
+                    sample_info.smplfmt = 0x0200; // SF2 supports 16-bit PCM and 24-bit PCM, and while DSE also supports 16-bit PCM, the problem comes with file size. 16-bit PCM is **massive**, and so it's very hard to fit many samples into the limited memory of the NDS, which could explain the abundant use of 4-bit ADPCM in the original game songs. With that in mind, here we will internally encode the sample data as ADPCM, and on top of that, lower the sample rate if necessary to compress the sample data as much as we possibly can.
                     sample_info.smplloop = !(sample_header.loop_start == 0 && sample_header.loop_end == 0); // SF2 does not seem to have a direct parameter for not looping. This seems to be it.
                     sample_info.smplrate = sample_header.sample_rate;
                     // smplpos is at the bottom
                     sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
-                    sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2; // Could also use sample_header.end. Have to see which works better.
+                    sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
                     // Write sample into main bank
-                    let sample_size_dpoints = (sample_info.loopbeg + sample_info.looplen) as usize * 2;
                     if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
                         let sample_pos_bytes = chunk.offset() + 8 + sample_header.start as u64 * 2;
-                        let mut raw_sample_data = vec![0_i16; sample_size_dpoints];
+                        let mut raw_sample_data = vec![0_i16; (sample_info.loopbeg + sample_info.looplen) as usize * 2];
                         let mut sf2file = File::open(&input_file_path)?;
                         sf2file.seek(std::io::SeekFrom::Start(sample_pos_bytes))?;
                         sf2file.read_i16_into::<LittleEndian>(&mut raw_sample_data)?;
 
                         // Resample and encode to ADPCM
-                        // let (raw_sample_data, new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, 22050.0, 505, (sample_header.loop_start - sample_header.start) as usize);
+                        let new_sample_rate = if sample_header.sample_rate > *resample_threshold {
+                            *sample_rate as f64
+                        } else {
+                            sample_header.sample_rate as f64
+                        };
+                        let raw_sample_data_len = raw_sample_data.len();
+                        let (raw_sample_data, new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
+                        sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
+                        sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
+                        sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
+
+                        // Sample length is defined by `loopbeg` and `looplen`, which are both indices based around 32bits. To avoid overlapping samples, calculate how much padding is needed to align the samples to 4 bytes here
+                        let alignment_padding_len = ((raw_sample_data.len() - 1) | 3) + 1 - raw_sample_data.len();
 
                         let mut cursor = Cursor::new(&mut main_bank_swdl_pcmd.data);
                         cursor.seek(std::io::SeekFrom::End(0))?;
                         for sample in raw_sample_data {
-                            cursor.write_i16::<LittleEndian>(sample)?;
+                            cursor.write_u8(sample)?;
+                        }
+
+                        // Write in the padding
+                        for _ in 0..alignment_padding_len {
+                            cursor.write_u8(0x00)?; //Todo: might be better to use some other method of padding to avoid artifacts
                         }
                     } else {
                         panic!("SF2 file `{}` does not contain any sample data!", input_file_path.display());
@@ -224,13 +246,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     sample_info.smplpos = pos_in_memory + first_sample_pos as u32;
 
+                    // Update pos_in_memory with this sample (should probably also align all the added samples to 4 bytes then)
+                    pos_in_memory += (sample_info.loopbeg + sample_info.looplen) * 4;
+
                     // Add the sampleinfo with the relative positions into the vec
                     sample_infos.push(sample_info_track_swdl);
                     // Add the other sampleinfo object into the main bank's swdl
                     main_bank_swdl.wavi.data.objects.push(sample_info);
-
-                    // Update position in memory
-                    pos_in_memory += sample_size_dpoints as u32 * 2;
                 }
 
                 // Create a blank track SWDL file
@@ -265,7 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // ID
                     program_info.header.id = preset.header.bank * 128 + preset.header.preset;
-                    program_info.header.prgvol = 127;
+                    program_info.header.prgvol = 100;
                     program_info.header.prgpan = 64;
                     program_info.header.PadByte = 170;
 
