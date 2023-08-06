@@ -401,6 +401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .find(|g| g.ty == soundfont::data::GeneratorType::ReleaseVolEnv)
                                 .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
                         );
+                        let mut ftune_overflowed = false;
                         for gen in zone.gen_list.iter() {
                             match gen.ty {
                                 soundfont::data::GeneratorType::StartAddrsOffset => {  },
@@ -481,17 +482,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 soundfont::data::GeneratorType::Reserved2 => {  },
                                 soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
                                 soundfont::data::GeneratorType::CoarseTune => {
-                                    let smpl;
-                                    if let Some(&sample_i) = zone.sample() {
-                                        smpl = &sample_infos[sample_i as usize];
-                                    } else if let Some(&sample_i) = other_zone.sample() {
-                                        smpl = &sample_infos[sample_i as usize];
-                                    } else {
-                                        println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
-                                        continue;
+                                    if !ftune_overflowed {
+                                        let smpl;
+                                        if let Some(&sample_i) = zone.sample() {
+                                            smpl = &sample_infos[sample_i as usize];
+                                        } else if let Some(&sample_i) = other_zone.sample() {
+                                            smpl = &sample_infos[sample_i as usize];
+                                        } else {
+                                            println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
+                                            continue;
+                                        }
+                                        let (ctune, _) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
+                                        split_entry.ctune = *gen.amount.as_i16().unwrap() as i8 + ctune;
                                     }
-                                    let (ctune, _) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
-                                    split_entry.ctune = *gen.amount.as_i16().unwrap() as i8 + ctune;
                                 },
                                 soundfont::data::GeneratorType::FineTune => {
                                     let smpl;
@@ -503,8 +506,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
                                         continue;
                                     }
-                                    let (_, ftune) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
-                                    split_entry.ftune = *gen.amount.as_i16().unwrap() as i8 + ftune;
+                                    let (ctune, ftune) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
+                                    let tmp = *gen.amount.as_i16().unwrap() as i64 + ftune as i64;
+                                    let (ctune_delta, ftune) = cents_to_ctune_ftune(tmp);
+                                    if ctune_delta != 0 {
+                                        // Overflow!
+                                        ftune_overflowed = true;
+                                        split_entry.ctune = zone.gen_list
+                                            .iter()
+                                            .find(|g| g.ty == soundfont::data::GeneratorType::CoarseTune)
+                                            .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i8 + ctune + ctune_delta;
+                                    }
+                                    split_entry.ftune = ftune;
                                 },
                                 soundfont::data::GeneratorType::SampleID => {
                                     // Check if the zone specifies which sample we have to use!
