@@ -1,3 +1,5 @@
+Jump [here](#usage) for information on usage.
+
 ## Description
 
 `dse` is made up of two components.
