@@ -1,12 +1,22 @@
 ## Description
 
-`dse` is a highly-compatible `.SWD` and `.SMD` file parser/writer based on Psy_Commando's [`ppmdu_2`](https://github.com/PsyCommando/ppmdu_2) parser, while also extending it with multi-levelled compat exporting and importing and thus, in many cases, binary-perfect imports and exports.
+`dse` is made up of two components.
+- First, a highly-compatible `.SWD` and `.SMD` file parser/writer based on Psy_Commando's [`ppmdu_2`](https://github.com/PsyCommando/ppmdu_2) parser, while also extending it with multi-levelled compat exporting and importing and thus, in many cases, binary-perfect imports and exports. This is the library section of the repo.
+- Then, built upon that are 2 fully-featured converters for creating `.SMD` sequence files from MIDI, and for creating `.SWD` soundbanks from the industry-standard `SF2` Soundfont format ([write-up](https://github.com/adakite1/dse/wiki/Findings-related-to-DSE's-internals-in-relation-to-the-prospects-of-custom-sample-import)), with the parameter mapping and audio processing for sample compatibility necessary to make the files compatible with the DSE sound system all built-in. This is the binaries section of the repo.
 
-Work is on-going on this repo.
+This repo should be pretty stable.
 
 ## Goal
 
-**To be as compatible as possible while guaranteeing write validity**
+#### To make custom music for EoS!
+
+To achieve this, there are two sub-goals:
+
+**1. To map the functionality of the MIDI and SF2 file formats so that custom music can be imported**
+
+**2. To be as compatible as possible and guarantee write validity**
+
+For those using this as a library, here is a bit of an elaboration on how `dse` ensures the latter. (You don't have to worry about it if you're using the binaries, it's taken care of for you :)
 
 This was written from the ground up to try to be as compatible as possible with the `.SWD` and `.SMD` file formats while also remaining as writable as possible. To achieve this, first all automatically generated parameters are written in on the fly based on specifications (things like `chunklen`), and secondly for the other values directly affecting the sound, decisions about the preservation of values of unknown meaning had to be made. There are currently 3 possible ways to use the parser:
 - **`.SWD` => memory => `.SWD`**<br/>
