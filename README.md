@@ -50,7 +50,7 @@ The binaries will be in `target/[debug or release]`.
 #### swdl_tool.exe
 `.\swdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.swd -o unpack`<br/>
 `.\swdl_tool.exe from-xml .\unpack\*.swd.xml -o .\NDS_UNPACK\data\SOUND\BGM\`<br/>
-`.\swdl_tool.exe add-sf2 ./*.sf2 ./bgm.swd -t 20000 -S 20000 -l 6`
+`.\swdl_tool.exe add-sf2 ./*.sf2 ./bgm.swd -t 20000 -S 20000 -l 3`
 
 #### smdl_tool.exe
 `.\smdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.smd -o unpack`<br/>
