@@ -12,7 +12,7 @@ use clap::{Parser, command, Subcommand};
 use colored::Colorize;
 use dse::smdl::{TrkChunk, DSEEvent};
 use dse::smdl::events::{Other, PlayNote, FixedDurationPause};
-use dse::swdl::DSEString;
+use dse::swdl::{DSEString, ProgramInfo};
 use dse::{smdl::SMDL, swdl::SWDL};
 use dse::dtype::ReadWrite;
 
@@ -67,6 +67,10 @@ enum Commands {
         /// Map Program Change and CC0 Bank Select events to DSE SWDL program id's
         #[arg(short = 'M', long, action)]
         midi_prgch: bool,
+
+        // If `generate_optimized_swdl` is set, new swdl files specifically made for the inputted MIDI files will be generated. This is to handle larger bank files so that only the instruments needed for the MIDI file will be loaded.
+        #[arg(long, action)]
+        generate_optimized_swdl: bool
     }
 }
 
@@ -121,10 +125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\nAll files successfully processed.");
         },
-        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, midi_prgch } => {
+        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, midi_prgch, generate_optimized_swdl } => {
             let (source_file_format, change_ext) = ("mid", "smd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
+            let input_file_paths_2: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, "swd");
 
             let mut swdl;
             if valid_file_of_type(swdl_path, "swd") {
@@ -139,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(Box::new(SMDLToolError::new("Provided SWD file is not an SWD file!")));
             }
 
-            for (input_file_path, output_file_path) in input_file_paths {
+            for ((input_file_path, output_file_path), (_, output_file_path_swd)) in input_file_paths.into_iter().zip(input_file_paths_2) {
                 print!("Converting {}... ", input_file_path.display());
 
                 // Open input MIDI file
@@ -331,11 +336,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Get a list of swdl presets in the file provided
+                let mut prgi_ids_prune_list: Vec<u16> = prgi_objects.iter().map(|x| x.header.id).collect();
+
                 // Fill the tracks into the smdl
                 smdl.trks.objects = trks.into_iter().map(|mut x| {
                     x.fix_current_global_tick(global_tick).unwrap();
+                    for id in x.programs_used() {
+                        if let Some(idx) = prgi_ids_prune_list.iter().position(|&r| r == *id as u16) {
+                            prgi_ids_prune_list.remove(idx);
+                        }
+                    }
                     x.close_track()
                 }).collect();
+
+                if *generate_optimized_swdl {
+                    // Remove unnecessary presets and samples
+                    let mut track_swdl = swdl.clone();
+                    let prgi_objects = &mut track_swdl.prgi.as_mut().expect("SWDL must contain a prgi chunk!").data.objects;
+                    for unneeded_prgi in prgi_ids_prune_list {
+                        if let Some(idx) = prgi_objects.iter().position(|prgm_info: &ProgramInfo| prgm_info.header.id == unneeded_prgi) {
+                            prgi_objects.remove(idx);
+                        }
+                    }
+                    let mut votes: HashMap<u16, usize> = HashMap::new();
+                    let wavi_objects = &mut track_swdl.wavi.data.objects;
+                    for prgi in prgi_objects {
+                        for split in &prgi.splits_table.objects {
+                            votes.insert(split.SmplID, 1); // Note that this will overwrite previous votes, but it shouldn't matter since as long as a single remaining preset depends on the sample, it should be kept.
+                        }
+                    }
+                    wavi_objects.retain(|obj| votes.contains_key(&obj.id));
+                    println!("\n{}", "Generating optimized SWDL file...".green());
+                    track_swdl.regenerate_read_markers()?;
+                    track_swdl.regenerate_automatic_parameters()?;
+                    track_swdl.write_to_file(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+                }
 
                 // Regenerate read markers for the SMDL
                 smdl.regenerate_read_markers()?;
@@ -358,14 +394,16 @@ pub struct TrkChunkWriter {
     trk: TrkChunk,
     notes_held: HashMap<u8, (usize, u128)>,
     bank: u8,
-    program: u8
+    program: u8,
+    programs_used: Vec<u8>,
+    last_program_change_global_tick: u128
 }
 impl TrkChunkWriter {
     pub fn new(trkid: u8, chanid: u8, unk1: u8, unk2: u8, default_program: u8) -> Result<TrkChunkWriter, Box<dyn std::error::Error>> {
         let mut trk = TrkChunk::default();
         trk.preamble.trkid = trkid;
         trk.preamble.chanid = chanid;
-        let mut trk_chunk_writer = TrkChunkWriter { current_global_tick: 0, trk, notes_held: HashMap::new(), bank: 0, program: 0 };
+        let mut trk_chunk_writer = TrkChunkWriter { current_global_tick: 0, trk, notes_held: HashMap::new(), bank: 0, program: 0, programs_used: Vec::new(), last_program_change_global_tick: 0 };
 
         // Fill in some standard events
         trk_chunk_writer.add_other_with_params_u8("SetTrackExpression", 100)?; // Random value for now
@@ -373,16 +411,26 @@ impl TrkChunkWriter {
             trk_chunk_writer.add_swdl(unk2)?;
             trk_chunk_writer.add_bank(unk1)?;
             trk_chunk_writer.add_other_with_params_u8("SetProgram", default_program)?;
+            trk_chunk_writer.programs_used.push(default_program);
         }
 
         Ok(trk_chunk_writer)
     }
+    pub fn programs_used(&self) -> &Vec<u8> {
+        &self.programs_used
+    }
     pub fn bank_select(&mut self, bank: u8) -> Result<(), Box<dyn std::error::Error>> {
         self.bank = bank;
+        if self.current_global_tick - self.last_program_change_global_tick == 0 { self.programs_used.pop(); }
+        self.programs_used.push(self.bank * 128 + self.program);
+        self.last_program_change_global_tick = self.current_global_tick;
         self.add_other_with_params_u8("SetProgram", self.bank * 128 + self.program)
     }
     pub fn program_change(&mut self, prgm: u8) -> Result<(), Box<dyn std::error::Error>> {
         self.program = prgm;
+        if self.current_global_tick - self.last_program_change_global_tick == 0 { self.programs_used.pop(); }
+        self.programs_used.push(self.bank * 128 + self.program);
+        self.last_program_change_global_tick = self.current_global_tick;
         self.add_other_with_params_u8("SetProgram", self.bank * 128 + self.program)
     }
     pub fn note_on(&mut self, key: u8, vel: u8) -> Result<(), Box<dyn std::error::Error>> {
@@ -390,7 +438,7 @@ impl TrkChunkWriter {
             println!("{}Overlapping notes detected! By default when there's note overlap a noteoff is sent immediately to avoid them.", "Warning: ".yellow());
             self.note_off(key)?;
         }
-        self.add_other_with_params_u8("SetTrackOctave", (key - 24) / 12 + 2)?; // An extra octave is added since by default pretty much every patch in the game default to -7 ctune
+        self.add_other_with_params_u8("SetTrackOctave", (key - 24) / 12 + 2)?; // AN EXTRA OCTAVE IS NOT LONGER ADDED BY DEFAULT SO THAT CUSTOM SOUND BANKS WORK CORRECTLY
         let mut evt = PlayNote::default();
         evt.velocity = vel;
         evt.octavemod = 2;

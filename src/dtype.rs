@@ -248,7 +248,7 @@ pub trait IsSelfIndexed {
     fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>>;
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Table<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
     #[serde(default)]
@@ -294,7 +294,7 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for Table<T> 
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PointerTable<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
     #[serde(default)]

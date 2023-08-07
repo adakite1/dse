@@ -26,7 +26,7 @@ const fn serde_use_common_values_for_unknowns<T>(_: &T) -> bool {
 /// Fields of unknown purpose are *intentionally left alone*
 /// Any other fields are also left alone
 
-#[derive(Debug, Default, Reflect)]
+#[derive(Debug, Clone, Default, Reflect)]
 pub struct DSEString<const U: u8> {
     inner: [u8; 16]
 }
@@ -70,7 +70,7 @@ impl<'de, const U: u8> Deserialize<'de> for DSEString<U> {
     }
 }
 
-#[derive(Debug, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct SWDLHeader {
     /// Note: 4-bytes represented as one u32
     #[serde(default = "GenericDefaultU32::<0x6C647773>::value")]
@@ -183,7 +183,7 @@ impl Default for SWDLHeader {
 }
 impl AutoReadWrite for SWDLHeader {  }
 
-#[derive(Debug, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct ChunkHeader {
     /// Note: 4-bytes represented as one u32
     #[serde(default)]
@@ -394,7 +394,7 @@ impl IsSelfIndexed for SampleInfo {
 }
 impl AutoReadWrite for SampleInfo {  }
 
-#[derive(Debug, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct ProgramInfoHeader {
     #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
     #[serde(rename = "@id")]
@@ -481,7 +481,7 @@ impl IsSelfIndexed for ProgramInfoHeader {
 }
 impl AutoReadWrite for ProgramInfoHeader {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Reflect, Serialize, Deserialize)]
 pub struct LFOEntry {
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
@@ -523,7 +523,7 @@ impl IsSelfIndexed for LFOEntry {
 }
 impl AutoReadWrite for LFOEntry {  }
 
-#[derive(Debug, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct SplitEntry {
     #[serde(default)]
     #[serde(skip_serializing)]
@@ -652,12 +652,12 @@ impl IsSelfIndexed for SplitEntry {
 }
 impl AutoReadWrite for SplitEntry {  }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Reflect, Serialize, Deserialize)]
 pub struct _ProgramInfoDelimiter {
     pub delimiter: [u8; 16],
 }
 impl AutoReadWrite for _ProgramInfoDelimiter {  }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramInfo {
     #[serde(flatten)]
     pub header: ProgramInfoHeader,
@@ -709,7 +709,7 @@ impl ReadWrite for ProgramInfo {
     }
 }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Reflect, Serialize, Deserialize)]
 pub struct Keygroup {
     #[serde(rename = "@id")]
     pub id: u16, // Index/ID of the keygroup
@@ -739,7 +739,7 @@ impl IsSelfIndexed for Keygroup {
 }
 impl AutoReadWrite for Keygroup {  }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WAVIChunk {
     #[serde(default)]
     #[serde(skip_serializing)]
@@ -773,7 +773,7 @@ impl ReadWrite for WAVIChunk {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PRGIChunk {
     #[serde(default)]
     #[serde(skip_serializing)]
@@ -807,12 +807,12 @@ impl ReadWrite for PRGIChunk {
     }
 }
 
-#[derive(Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Reflect, Serialize, Deserialize)]
 pub struct _KeygroupsSampleDataDelimiter {
     pub delimiter: [u8; 8],
 }
 impl AutoReadWrite for _KeygroupsSampleDataDelimiter {  }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KGRPChunk {
     #[serde(default)]
     #[serde(skip_serializing)]
@@ -869,7 +869,7 @@ mod base64 {
             .map_err(|e| serde::de::Error::custom(e))
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PCMDChunk {
     #[serde(default)]
     #[serde(skip_serializing)]
@@ -911,7 +911,7 @@ impl ReadWrite for PCMDChunk {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SWDL {
     pub header: SWDLHeader,
     pub wavi: WAVIChunk,
