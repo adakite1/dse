@@ -23,9 +23,9 @@ This also guarantees that, as long as the writer picks the appropriate level of 
 
 ## Usage
 
-While this can be used as a Rustlang crate for those who are feeling adventurous, the intended way to use it is to use the binaries the crate generates. Pre-built binaries are available through [here](https://github.com/adakite1/dse/actions).
+While this can be used as a Rustlang crate for those who are feeling adventurous, the intended way to use it is to use the binaries the crate generates.
 
-But! If you wanna build it yourself, you can do that too:
+Build process:
 1. Install Rustlang
 2. `git clone https://github.com/adakite1/dse.git`
 3. `cd dse`
@@ -37,12 +37,13 @@ The binaries will be in `target/[debug or release]`.
 
 #### swdl_tool.exe
 `.\swdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.swd -o unpack`<br/>
-`.\swdl_tool.exe from-xml .\unpack\*.swd.xml -o .\NDS_UNPACK\data\SOUND\BGM\`
+`.\swdl_tool.exe from-xml .\unpack\*.swd.xml -o .\NDS_UNPACK\data\SOUND\BGM\`<br/>
+`.\swdl_tool.exe add-sf2 ./*.sf2 ./bgm.swd -t 20000 -S 20000 -l 6`
 
 #### smdl_tool.exe
 `.\smdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.smd -o unpack`<br/>
 `.\smdl_tool.exe from-xml .\unpack\*.smd.xml -o .\NDS_UNPACK\data\SOUND\BGM\`<br/>
-`.\smdl_tool.exe from-midi .\midi_export.mid ./bgm0043.swd`
+`.\smdl_tool.exe from-midi .\midi_export.mid ./bgm0043.swd --midi-prgch --generate-optimized-swdl`
 
 **A quick note on the MIDI conversion functionality:**
 - The MIDI file must be of type `smf0` or, in the case of `smf1`, be composed of 16 MIDI tracks or lower! (Not counting any meta event tracks at the very start if your music composition software exports those)
