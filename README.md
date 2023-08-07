@@ -55,13 +55,25 @@ The binaries will be in `target/[debug or release]`.
 `.\smdl_tool.exe from-xml .\unpack\*.smd.xml -o .\NDS_UNPACK\data\SOUND\BGM\`<br/>
 `.\smdl_tool.exe from-midi .\midi_export.mid ./bgm0043.swd --midi-prgch --generate-optimized-swdl`
 
-**A quick note on the MIDI conversion functionality:**
+**Notes on the MIDI conversion functionality:**
+- ***First thing to do if there's an error or the result sounds weird:* Try importing the MIDI file into a DAW and reexporting it! Sometimes MIDI files have quirks in them that trip the parser up, but a DAW usually helps straighten this out. (The one I tested with was Reaper, so it should work the best)**
 - The MIDI file must be of type `smf0` or, in the case of `smf1`, be composed of 16 MIDI tracks or lower! (Not counting any meta event tracks at the very start if your music composition software exports those)
 - Currently, the instruments are mapped automatically to the entries in the `prgi` chunk of the provided SWD file, channel number <=> index in the `prgi` chunk
 - P.s., you can also just put in the `SWD.XML` file directly into that command and it should still work
 - CC07 Volume, CC10 Pan Position, and CC11 Expression are the currently supported MIDI CC controllers; they're mapped to their SMDL equivalents
 - If you want a track to loop and go back to an earlier position after reaching the end, you need to add a MIDI Meta event of the `Marker` type, and set it to "LoopStart" (this is in parity with `ppmdu_2` MIDI exports too!)
 - ... That's all I can think of for now, if there's something else I'll update this. Ping me about any weirdness that happens!
+
+**Notes on the SF2 conversion functionality:**
+- ***First thing to do if there's an error or the result sounds weird:* Try importing the SF2 file into Polyphone and reexporting it! This is for the same reason as with the MIDI file, but it helps straighten the file out so that the parser can read it more easily.**
+- In general, [Polyphone](https://www.polyphone-soundfonts.com/) is your best friend.
+- **Common Error - `TryFromIntError`:** For example, an error that could occur here is `TryFromIntError`. If you get this, then the soundfont is just too big to contain in the swdl bank. Simply open the soundfont in Polyphone, create new soundfont, and copy the instruments you want into it, and voila! You can load it in swdl_tool now.
+- **Side note/rule of thumb:** Sample rate and lookahead > # of samples. A lot of new sf2's have like a million samples in them for a single piano, which is amazing when you have a computer from the last 10 years, but the NDS is not that. Always prioritize quality of the few samples you have over the # of samples! If you look at a sample bank from EoS, you'll see lots of instruments with just 1 or 2 samples.
+- **Quick tip:** The main bank can store a lot of unused samples, but you can only load so many samples at one time! So, for each track, try to minmax the amount of samples you can load in memory at one time, keeping in mind the amount you'll need for the other stuff too. Probably best to do this last. (P.s. if there's not enough memory, it'll just show a black screen)
+- **Pro tip! (It's called pro tip because you don't really have to worry about this until much later):** Higher lookahead means better samples! However, longer lookahead takes longer. Thus, a tip is to work with less lookahead at the start, and when it's time to ship your hack, leave it over night on a high setting so that it can do the number crunching while you're asleep! (The difference might be minimal so really this is a last step before publishing)
+- **Common Error - Game shows black screen after adding in the generated files:** The NDS has limited memory, and you have reached it! Remember, you can store as many samples as you want in the main bank (well, practically), but in individual tracks you can only load so many samples at a time. (The limit is around 100kB in uncompressed audio in my testing) Use `--generate-optimized-swdl` to prevent loading unused samples for individual tracks, and, especially for modern soundfonts with huge numbers of samples in them, try to cut them down in Polyphone.
+
+Finally, if you're ever confused about how to use the CLI tools, do `./smdl_tool.exe --help` and `./swdl_tool.exe --help`. There's explanations for everything these tools can do in there.
 
 **Important note:** DON'T RUN `dse.exe`!! It shouldn't do much but it's the file I use for doing very specific things like reading specifically named files and stuff for testing purposes. Use the other two :)
 
