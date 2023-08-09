@@ -61,7 +61,8 @@ The binaries will be in `target/[debug or release]`.
 - ***First thing to do if there's an error or the result sounds weird:* Try importing the MIDI file into a DAW and reexporting it! Sometimes MIDI files have quirks in them that trip the parser up, but a DAW usually helps straighten this out. (The one I tested with was Reaper, so it should work the best)**
 - The MIDI file must be of type `smf0` or, in the case of `smf1`, be composed of 16 MIDI tracks or lower! (Not counting any meta event tracks at the very start if your music composition software exports those)
 - Currently, the instruments are mapped automatically to the entries in the `prgi` chunk of the provided SWD file, channel number <=> index in the `prgi` chunk
-- P.s., you can also just put in the `SWD.XML` file directly into that command and it should still work
+- ↳ **Alternatively,** a new flag was introduced to `smdl_tool` recently, `-M`/`--midi-prgch`. Using this flag, instead of mapping by index, the programs will be mapped using MIDI program change and bank select commands. The formula is as follows: `final_mapping = midi_bank * 128 + midi_program_change`
+- P.s., for certain commands, you can simply put in a `swd.xml` file and it would still work as intended. Consult `--help` for the subcommand in question to find out.
 - CC07 Volume, CC10 Pan Position, and CC11 Expression are the currently supported MIDI CC controllers; they're mapped to their SMDL equivalents
 - If you want a track to loop and go back to an earlier position after reaching the end, you need to add a MIDI Meta event of the `Marker` type, and set it to "LoopStart" (this is in parity with `ppmdu_2` MIDI exports too!)
 - ... That's all I can think of for now, if there's something else I'll update this. Ping me about any weirdness that happens!
