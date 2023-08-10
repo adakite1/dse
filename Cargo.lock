@@ -376,8 +376,8 @@ dependencies = [
 
 [[package]]
 name = "dse-dsp-sys"
-version = "0.1.0"
-source = "git+https://github.com/adakite1/dse-dsp-sys.git#bad1e3fea3c7eede72892d018406ad1dc1ab62d5"
+version = "0.1.1"
+source = "git+https://github.com/adakite1/dse-dsp-sys.git#a19f1bb669be9b076063f15da078324cbb273a81"
 dependencies = [
  "cc",
 ]
