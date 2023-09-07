@@ -4,20 +4,21 @@ use std::ffi::c_int;
 /// Example: .\swdl_tool.exe from-xml .\unpack\*.swd.xml -o .\NDS_UNPACK\data\SOUND\BGM\
 
 use std::fs::File;
-use std::io::{Write, Seek, Cursor};
+use std::io::{Write, Seek, Cursor, Read};
 use std::path::PathBuf;
 
 use byteorder::{WriteBytesExt, ReadBytesExt, LittleEndian};
 use clap::{Parser, command, Subcommand};
 use colored::Colorize;
-use dse::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, DSEString, ProgramInfo, SplitEntry, LFOEntry, PRGIChunk, KGRPChunk, Keygroup};
-use dse::dtype::ReadWrite;
+use dse::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, DSEString, ProgramInfo, SplitEntry, LFOEntry, PRGIChunk, KGRPChunk, Keygroup, PCMDChunk, WAVIChunk};
+use dse::dtype::{ReadWrite, PointerTable, DSEError};
 
 #[path = "../binutils.rs"]
 mod binutils;
 use binutils::{VERSION, valid_file_of_type};
 use dse_dsp_sys::process_mono;
 use phf::phf_map;
+use soundfont::data::SampleHeader;
 use soundfont::{SoundFont2, Zone};
 use crate::binutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, get_file_last_modified_date_with_default};
 
@@ -88,22 +89,7 @@ enum Commands {
     }
 }
 
-/// Error to represent a variety of errors emitted by smdl_tool
-#[derive(Debug, Clone)]
-pub struct SWDLToolError(String);
-impl SWDLToolError {
-    pub fn new(message: &str) -> SWDLToolError {
-        SWDLToolError(String::from(message))
-    }
-}
-impl std::fmt::Display for SWDLToolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", &self.0)
-    }
-}
-impl std::error::Error for SWDLToolError {  }
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), DSEError> {
     let cli = Cli::parse();
 
     match &cli.command {
@@ -111,10 +97,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (source_file_format, change_ext) = match &cli.command {
                 Commands::FromXML { input_glob: _, output_folder: _ } => ("xml", ""),
                 Commands::ToXML { input_glob: _, output_folder: _ } => ("swd", "swd.xml"),
-                _ => panic!("Internal error"),
+                _ => panic!("Unreachable"),
             };
             let output_folder = get_final_output_folder(output_folder)?;
-            let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
+            let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
 
             for (input_file_path, output_file_path) in input_file_paths {
                 print!("Converting {}... ", input_file_path.display());
@@ -143,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
-            let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext);
+            let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
             
             let mut main_bank_swdl;
             if valid_file_of_type(swdl_path, "swd") {
@@ -155,495 +141,483 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 main_bank_swdl.regenerate_read_markers()?;
                 main_bank_swdl.regenerate_automatic_parameters()?;
             } else {
-                return Err(Box::new(SWDLToolError::new("Provided Main Bank SWD file is not an SWD file!")));
+                return Err(DSEError::Invalid("Provided Main Bank SWD file is not an SWD file!".to_string()));
             }
 
             // Start patching in the SF2 files one by one
             for (input_file_path, output_file_path) in input_file_paths {
                 print!("Patching in {}... ", input_file_path.display());
                 
-                let sf2 = SoundFont2::load(&mut File::open(&input_file_path)?).map_err(|err| SWDLToolError::new(&format!("{:?}", err)))?;
+                let sf2 = SoundFont2::load(&mut File::open(&input_file_path)?).map_err(|x| DSEError::SoundFontParseError(format!("{:?}", x)))?;
                 
-                // Write in the raw sample data
-                let main_bank_swdl_pcmd = main_bank_swdl.pcmd.as_mut().ok_or(SWDLToolError::new("The Main Bank SWDL file passed in does not contain any sample data!"))?;
-                let main_bank_swdl_pcmd_last_sample = main_bank_swdl.wavi.data.last().ok_or(SWDLToolError::new("Main bank contains zero wavi entries!"))?;
-                let first_sample_pos = main_bank_swdl_pcmd_last_sample.smplpos + (main_bank_swdl_pcmd_last_sample.loopbeg + main_bank_swdl_pcmd_last_sample.looplen) * 4;
-                // if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
-                //     let raw_sample_data = chunk.read_contents(&mut File::open(&input_file_path)?)?;
-                //     main_bank_swdl_pcmd.data.extend(raw_sample_data);
-                // } else {
-                //     panic!("SF2 file `{}` does not contain any sample data!", input_file_path.display());
-                // }
+                struct DSPOptions {
+                    resample_threshold: u32,
+                    sample_rate: f64,
+                    adpcm_encoder_lookahead: i32
+                }
+                fn copy_raw_sample_data<R>(mut sf2file: R, sf2: &SoundFont2, bank: &mut SWDL, dsp_options: DSPOptions, sample_rate_adjustment_curve: usize, filter_samples: fn(&(usize, &SampleHeader)) -> bool) -> Result<(usize, Vec<SampleInfo>), DSEError>
+                where
+                    R: Read + Seek {
+                    let main_bank_swdl_pcmd = bank.pcmd.get_or_insert(PCMDChunk::default());
+                    let main_bank_swdl_wavi = &mut bank.wavi;
 
-                // Create the SampleInfo entries for all the samples
-                let mut sample_infos = Vec::with_capacity(sf2.sample_headers.len());
-                let first_available_id = main_bank_swdl.wavi.data.slots();
-                let mut pos_in_memory = 0;
-                for (i, sample_header) in sf2.sample_headers.iter().enumerate() {
-                    // Create blank sampleinfo object
-                    let mut sample_info = SampleInfo::default();
+                    let first_sample_pos = main_bank_swdl_wavi.data.objects.iter().map(|x| x.smplpos + (x.loopbeg + x.looplen) * 4).max().unwrap_or(0);
 
-                    // ID
-                    sample_info.id = (first_available_id + i) as u16;
+                    // Create the SampleInfo entries for all the samples
+                    let mut sample_infos = Vec::with_capacity(sf2.sample_headers.len());
+                    let first_available_id = main_bank_swdl_wavi.data.slots();
+                    let mut pos_in_memory = 0;
 
-                    sample_info.smplrate = sample_header.sample_rate;
-                    // let (ctune, ftune) = sample_rate_adjustment_2(sample_info.smplrate as f64)?;
-                    // sample_info.ftune = ftune + sample_header.pitchadj;
-                    // sample_info.ctune = ctune;
-                    if sample_header.origpitch >= 128 { // origpitch - 255 is reserved for percussion by convention, 128-254 is invalid, but either way the SF2 standard recommends defaulting to 60 when 128-255 is encountered.
-                        sample_info.rootkey = 60;
-                    } else {
-                        sample_info.rootkey = sample_header.origpitch as i8;
-                    }
-                    sample_info.volume = 127; // SF2 does not have a volume parameter per sample
-                    sample_info.pan = 64; // SF2 does not have a pan parameter per sample, and any panning work related to stereo samples are relegated to the Instruments layer anyways
-                    sample_info.smplfmt = 0x0200; // SF2 supports 16-bit PCM and 24-bit PCM, and while DSE also supports 16-bit PCM, the problem comes with file size. 16-bit PCM is **massive**, and so it's very hard to fit many samples into the limited memory of the NDS, which could explain the abundant use of 4-bit ADPCM in the original game songs. With that in mind, here we will internally encode the sample data as ADPCM, and on top of that, lower the sample rate if necessary to compress the sample data as much as we possibly can.
-                    sample_info.smplloop = sample_header.loop_start != sample_header.loop_end; // SF2 does not seem to have a direct parameter for not looping. This seems to be it.
-                    // smplrate is up above with ctune and ftune
-                    // smplpos is at the bottom
-                    sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
-                    if sample_info.smplloop {
-                        sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
-                    } else {
-                        // Not looping, so loop_end - loop_start is zero. Use end - loop_start instead
-                        sample_info.looplen = (sample_header.end - sample_header.loop_start) / 2;
-                    }
-                    // Write sample into main bank
-                    if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
-                        let sample_pos_bytes = chunk.offset() + 8 + sample_header.start as u64 * 2;
-                        let mut raw_sample_data = vec![0_i16; (sample_info.loopbeg + sample_info.looplen) as usize * 2];
-                        let mut sf2file = File::open(&input_file_path)?;
-                        sf2file.seek(std::io::SeekFrom::Start(sample_pos_bytes))?;
-                        sf2file.read_i16_into::<LittleEndian>(&mut raw_sample_data)?;
-
-                        // Resample and encode to ADPCM
-                        let new_sample_rate = if sample_header.sample_rate > *resample_threshold {
-                            *sample_rate as f64
+                    for (i, sample_header) in sf2.sample_headers.iter().enumerate().filter(filter_samples).enumerate().map(|(i, (_, sample_header))| (i, sample_header)) {
+                        // Create blank sampleinfo object
+                        let mut sample_info = SampleInfo::default();
+    
+                        // ID
+                        sample_info.id = (first_available_id + i) as u16;
+    
+                        sample_info.smplrate = sample_header.sample_rate;
+                        if sample_header.origpitch >= 128 { // origpitch - 255 is reserved for percussion by convention, 128-254 is invalid, but either way the SF2 standard recommends defaulting to 60 when 128-255 is encountered.
+                            sample_info.rootkey = 60;
                         } else {
-                            sample_header.sample_rate as f64
-                        };
-                        let raw_sample_data_len = raw_sample_data.len();
-                        let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, *adpcm_encoder_lookahead, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
-                        if new_loop_start == 4 {
-                            new_loop_start = 0;
+                            sample_info.rootkey = sample_header.origpitch as i8;
                         }
-                        sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
-                        let (ctune, ftune) = sample_rate_adjustment(new_sample_rate, *sample_rate_adjustment_curve)?;
-                        sample_info.ftune = ftune + sample_header.pitchadj;
-                        sample_info.ctune = ctune;
-                        sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
-                        sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
-
-                        // Sample length is defined by `loopbeg` and `looplen`, which are both indices based around 32bits. To avoid overlapping samples, calculate how much padding is needed to align the samples to 4 bytes here
-                        let alignment_padding_len = ((raw_sample_data.len() - 1) | 3) + 1 - raw_sample_data.len();
-
-                        let mut cursor = Cursor::new(&mut main_bank_swdl_pcmd.data);
-                        cursor.seek(std::io::SeekFrom::End(0))?;
-                        for sample in raw_sample_data {
-                            cursor.write_u8(sample)?;
+                        sample_info.volume = 127; // SF2 does not have a volume parameter per sample
+                        sample_info.pan = 64; // SF2 does not have a pan parameter per sample, and any panning work related to stereo samples are relegated to the Instruments layer anyways
+                        sample_info.smplfmt = 0x0200; // SF2 supports 16-bit PCM and 24-bit PCM, and while DSE also supports 16-bit PCM, the problem comes with file size. 16-bit PCM is **massive**, and so it's very hard to fit many samples into the limited memory of the NDS, which could explain the abundant use of 4-bit ADPCM in the original game songs. With that in mind, here we will internally encode the sample data as ADPCM, and on top of that, lower the sample rate if necessary to compress the sample data as much as we possibly can.
+                        sample_info.smplloop = sample_header.loop_start != sample_header.loop_end; // SF2 does not seem to have a direct parameter for not looping. This seems to be it.
+                        // smplrate is up above with ctune and ftune
+                        // smplpos is at the bottom
+                        sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
+                        if sample_info.smplloop {
+                            sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
+                        } else {
+                            // Not looping, so loop_end - loop_start is zero. Use end - loop_start instead
+                            sample_info.looplen = (sample_header.end - sample_header.loop_start) / 2;
                         }
+                        // Write sample into main bank
+                        if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
+                            let sample_pos_bytes = chunk.offset() + 8 + sample_header.start as u64 * 2;
+                            let mut raw_sample_data = vec![0_i16; (sample_info.loopbeg + sample_info.looplen) as usize * 2];
 
-                        // Write in the padding
-                        for _ in 0..alignment_padding_len {
-                            cursor.write_u8(0x00)?; //Todo: might be better to use some other method of padding to avoid artifacts
+                            sf2file.seek(std::io::SeekFrom::Start(sample_pos_bytes)).map_err(|_| DSEError::SampleFindError(sample_header.name.clone(), sample_pos_bytes))?;
+                            sf2file.read_i16_into::<LittleEndian>(&mut raw_sample_data).map_err(|_| DSEError::SampleReadError(sample_header.name.clone(), sample_pos_bytes, raw_sample_data.len()));
+    
+                            // Resample and encode to ADPCM
+                            let new_sample_rate = if sample_header.sample_rate > dsp_options.resample_threshold {
+                                dsp_options.sample_rate
+                            } else {
+                                sample_header.sample_rate as f64
+                            };
+                            let raw_sample_data_len = raw_sample_data.len();
+                            let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, dsp_options.adpcm_encoder_lookahead, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
+                            if new_loop_start == 4 {
+                                new_loop_start = 0;
+                            }
+                            sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
+                            let (ctune, ftune) = sample_rate_adjustment(new_sample_rate, sample_rate_adjustment_curve)?;
+                            sample_info.ftune = ftune + sample_header.pitchadj;
+                            sample_info.ctune = ctune;
+                            sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
+                            sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
+    
+                            // Sample length is defined by `loopbeg` and `looplen`, which are both indices based around 32bits. To avoid overlapping samples, calculate how much padding is needed to align the samples to 4 bytes here
+                            let alignment_padding_len = ((raw_sample_data.len() - 1) | 3) + 1 - raw_sample_data.len();
+    
+                            let mut cursor = Cursor::new(&mut main_bank_swdl_pcmd.data);
+                            cursor.seek(std::io::SeekFrom::End(0)).map_err(|_| DSEError::_InMemorySeekFailed())?;
+                            for sample in raw_sample_data {
+                                cursor.write_u8(sample).map_err(|_| DSEError::_InMemoryWriteFailed())?;
+                            }
+    
+                            // Write in the padding
+                            for _ in 0..alignment_padding_len {
+                                cursor.write_u8(0x00).map_err(|_| DSEError::_InMemoryWriteFailed())?; //Todo: might be better to use some other method of padding to avoid artifacts
+                            }
+                        } else {
+                            println!("{}SF2 file does not contain any sample data!", "Warning: ".yellow());
                         }
-                    } else {
-                        panic!("SF2 file `{}` does not contain any sample data!", input_file_path.display());
+                        sample_info.volume_envelope = ADSRVolumeEnvelope::default2();
+    
+                        let mut sample_info_track_swdl = sample_info.clone();
+                        sample_info_track_swdl.smplpos = pos_in_memory;
+    
+                        sample_info.smplpos = pos_in_memory + first_sample_pos as u32;
+    
+                        // Update pos_in_memory with this sample (should probably also align all the added samples to 4 bytes then)
+                        pos_in_memory += (sample_info.loopbeg + sample_info.looplen) * 4;
+    
+                        // Add the sampleinfo with the relative positions into the vec
+                        sample_infos.push(sample_info_track_swdl);
+                        // Add the other sampleinfo object into the main bank's swdl
+                        main_bank_swdl_wavi.data.objects.push(sample_info);
                     }
-                    // match sample_header.sample_type {
-                    //     soundfont::data::sample::SampleLink::RightSample | soundfont::data::sample::SampleLink::LeftSample => {
-                    //         sample_info.unk6 = first_available_id as u16 + sample_header.sample_link; // Wild guess: maybe DSE also has something similar to the SF2 link byte, allowing for stereo playback?
-                    //     },
-                    //     _ => {  }
-                    // };
-                    sample_info.volume_envelope = ADSRVolumeEnvelope::default();
-                    // These params are the default for all samples in the WAVI section as seen from the bgm0001.swd and bgm.swd files. 
-                    sample_info.volume_envelope.envon = true;
-                    sample_info.volume_envelope.envmult = 1;
-                    sample_info.volume_envelope.atkvol = 0;
-                    sample_info.volume_envelope.attack = 0;
-                    sample_info.volume_envelope.decay = 0;
-                    sample_info.volume_envelope.sustain = 127;
-                    sample_info.volume_envelope.hold = 0;
-                    sample_info.volume_envelope.decay2 = 127;
-                    sample_info.volume_envelope.release = 40;
 
-                    let mut sample_info_track_swdl = sample_info.clone();
-                    sample_info_track_swdl.smplpos = pos_in_memory;
-
-                    sample_info.smplpos = pos_in_memory + first_sample_pos as u32;
-
-                    // Update pos_in_memory with this sample (should probably also align all the added samples to 4 bytes then)
-                    pos_in_memory += (sample_info.loopbeg + sample_info.looplen) * 4;
-
-                    // Add the sampleinfo with the relative positions into the vec
-                    sample_infos.push(sample_info_track_swdl);
-                    // Add the other sampleinfo object into the main bank's swdl
-                    main_bank_swdl.wavi.data.objects.push(sample_info);
+                    Ok((first_available_id, sample_infos))
                 }
 
-                // Create a blank track SWDL file
-                let mut track_swdl = SWDL::default();
-                let (year, month, day, hour, minute, second, centisecond) = get_file_last_modified_date_with_default(&input_file_path)?;
-                track_swdl.header.version = 0x415;
-                track_swdl.header.year = year;
-                track_swdl.header.month = month;
-                track_swdl.header.day = day;
-                track_swdl.header.hour = hour;
-                track_swdl.header.minute = minute;
-                track_swdl.header.second = second;
-                track_swdl.header.centisecond = centisecond;
+                fn copy_presets(sf2: &SoundFont2, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> PointerTable<ProgramInfo> {
+                    // Loop through the presets and use it to fill in the track swdl object
+                    let mut prgi_pointer_table = PointerTable::new(sf2.presets.len(), 0);
+                    for preset in &sf2.presets {
+                        // Create blank programinfo object
+                        let mut program_info = ProgramInfo::default();
 
-                let mut fname = input_file_path.file_name().ok_or(SWDLToolError::new(&format!("Couldn't obtain filename of SF2 file with path {}!", input_file_path.display())))?
-                    .to_str().ok_or(SWDLToolError::new(&format!("Couldn't convert filename for SF2 file with path {} into a UTF-8 Rust String. Filenames should be pure-ASCII only!", input_file_path.display())))?
-                    .to_string();
-                if !fname.is_ascii() {
-                    panic!("Filenames must be ASCII-only!");
-                }
-                fname.truncate(15);
-                track_swdl.header.fname = DSEString::<0xAA>::try_from(fname)?;
+                        // ID
+                        program_info.header.id = preset.header.bank * 128 + preset.header.preset;
+                        program_info.header.prgvol = 127;
+                        program_info.header.prgpan = 64;
+                        program_info.header.PadByte = 170;
 
-                // Add the sample info objects we created before
-                track_swdl.wavi.data.objects = sample_infos;
+                        // Create the 4 LFOs (each preset in SF2 can have many instruments, with each instruments containing multiple samples, and each of those samples can have their own LFOs. 4 is just not enough to map all that, and so this is left to its default state. For now, please add LFOs manually to taste :)
+                        let lfos: Vec<LFOEntry> = (0..4).map(|_| LFOEntry::default()).collect();
+                        program_info.lfo_table.objects = lfos;
 
-                // Loop through the presets and use it to fill in the track swdl object
-                let mut track_swdl_prgi = PRGIChunk::new(sf2.presets.len());
-                for preset in &sf2.presets {
-                    // Create blank programinfo object
-                    let mut program_info = ProgramInfo::default();
-
-                    // ID
-                    program_info.header.id = preset.header.bank * 128 + preset.header.preset;
-                    program_info.header.prgvol = 127;
-                    program_info.header.prgpan = 64;
-                    program_info.header.PadByte = 170;
-
-                    // Create the 4 LFOs (each preset in SF2 can have many instruments, with each instruments containing multiple samples, and each of those samples can have their own LFOs. 4 is just not enough to map all that, and so this is left to its default state. For now, please add LFOs manually to taste :)
-                    let lfos: Vec<LFOEntry> = (0..4).map(|_| {
-                        LFOEntry {
-                            unk34: 0,
-                            unk52: 0,
-                            dest: 0,
-                            wshape: 1,
-                            rate: 0,
-                            unk29: 0,
-                            depth: 0,
-                            delay: 0,
-                            unk32: 0,
-                            unk33: 0
-                        }
-                    }).collect();
-                    program_info.lfo_table.objects = lfos;
-
-                    // https://stackoverflow.com/questions/67016985/map-numeric-range-rust
-                    fn map_range(from_range: (f64, f64), to_range: (f64, f64), s: f64) -> f64 {
-                        to_range.0 + (s - from_range.0) * (to_range.1 - to_range.0) / (from_range.1 - from_range.0)
-                    }
-
-                    fn timecents_to_milliseconds(timecents: i16) -> i32 {
-                        (1000.0_f64 * 2.0_f64.powf(timecents as f64 / 1200.0_f64)).round() as i32
-                    }
-                    fn timecents_to_index(timecents: i16) -> (u8, i8) {
-                        let msec = timecents_to_milliseconds(timecents);
-                        if msec <= 0x7FFF {
-                            (1_u8, lookup_env_time_value_i16(msec as i16))
-                        } else {
-                            (0_u8, lookup_env_time_value_i32(msec))
-                        }
-                    }
-                    fn lookup_env_time_value_i16(msec: i16) -> i8 {
-                        match LOOKUP_TABLE_20_B0_F50.binary_search(&msec) {
-                            Ok(index) => index as i8,
-                            Err(index) => {
-                                if index == 0 { index as i8 }
-                                else if index == LOOKUP_TABLE_20_B0_F50.len() { 127 }
-                                else {
-                                    if (LOOKUP_TABLE_20_B0_F50[index] - msec) > (msec - LOOKUP_TABLE_20_B0_F50[index-1]) {
-                                        (index - 1) as i8
-                                    } else {
-                                        index as i8
+                        /// Function to apply data from a zone to a split
+                        /// 
+                        /// Returns `true` if the zone provided is a global zone
+                        fn apply_zone_data_to_split(split_entry: &mut SplitEntry, zone: &Zone, is_first_zone: bool, other_zones: &[&Zone], sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> bool {
+                            fn gain(decibels: f64) -> f64 {
+                                10.0_f64.powf(decibels / 20.0)
+                            }
+                            fn decibels(gain: f64) -> f64 {
+                                20.0 * gain.log10()
+                            }
+                            fn timecents_to_milliseconds(timecents: i16) -> i32 {
+                                (1000.0_f64 * 2.0_f64.powf(timecents as f64 / 1200.0_f64)).round() as i32
+                            }
+                            fn timecents_to_index(timecents: i16) -> (u8, i8) {
+                                let msec = timecents_to_milliseconds(timecents);
+                                if msec <= 0x7FFF {
+                                    (1_u8, lookup_env_time_value_i16(msec as i16))
+                                } else {
+                                    (0_u8, lookup_env_time_value_i32(msec))
+                                }
+                            }
+                            fn lookup_env_time_value_i16(msec: i16) -> i8 {
+                                match LOOKUP_TABLE_20_B0_F50.binary_search(&msec) {
+                                    Ok(index) => index as i8,
+                                    Err(index) => {
+                                        if index == 0 { index as i8 }
+                                        else if index == LOOKUP_TABLE_20_B0_F50.len() { 127 }
+                                        else {
+                                            if (LOOKUP_TABLE_20_B0_F50[index] - msec) > (msec - LOOKUP_TABLE_20_B0_F50[index-1]) {
+                                                (index - 1) as i8
+                                            } else {
+                                                index as i8
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
-                    fn lookup_env_time_value_i32(msec: i32) -> i8 {
-                        match LOOKUP_TABLE_20_B1050.binary_search(&msec) {
-                            Ok(index) => index as i8,
-                            Err(index) => {
-                                if index == 0 { index as i8 }
-                                else if index == LOOKUP_TABLE_20_B1050.len() { 127 }
-                                else {
-                                    if (LOOKUP_TABLE_20_B1050[index] - msec) > (msec - LOOKUP_TABLE_20_B1050[index-1]) {
-                                        (index - 1) as i8
-                                    } else {
-                                        index as i8
+                            fn lookup_env_time_value_i32(msec: i32) -> i8 {
+                                match LOOKUP_TABLE_20_B1050.binary_search(&msec) {
+                                    Ok(index) => index as i8,
+                                    Err(index) => {
+                                        if index == 0 { index as i8 }
+                                        else if index == LOOKUP_TABLE_20_B1050.len() { 127 }
+                                        else {
+                                            if (LOOKUP_TABLE_20_B1050[index] - msec) > (msec - LOOKUP_TABLE_20_B1050[index-1]) {
+                                                (index - 1) as i8
+                                            } else {
+                                                index as i8
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
-                    pub fn decibels(gain: f64) -> f64 {
-                        20.0 * gain.log10()
-                    }
-                    pub fn gain(decibels: f64) -> f64 {
-                        10.0_f64.powf(decibels / 20.0)
-                    }
-
-                    /// Function to apply data from a zone to a split
-                    /// 
-                    /// Returns `true` if the zone provided is a global zone
-                    fn apply_zone_data_to_split(split_entry: &mut SplitEntry, zone: &Zone, is_first_zone: bool, other_zones: &[&Zone], sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> bool {
-                        let mut possibly_a_global_zone = true;
-                        // Loop through all the generators in this zone
-                        let (mut attack, mut hold, mut decay, mut release) = (
-                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
-                                .find(|g| g.ty == soundfont::data::GeneratorType::AttackVolEnv)
-                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
-                                .find(|g| g.ty == soundfont::data::GeneratorType::HoldVolEnv)
-                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
-                                .find(|g| g.ty == soundfont::data::GeneratorType::DecayVolEnv)
-                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
-                                .find(|g| g.ty == soundfont::data::GeneratorType::ReleaseVolEnv)
-                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                        );
-                        let mut ftune_overflowed = false;
-                        for gen in zone.gen_list.iter() {
-                            match gen.ty {
-                                soundfont::data::GeneratorType::StartAddrsOffset => {  },
-                                soundfont::data::GeneratorType::EndAddrsOffset => {  },
-                                soundfont::data::GeneratorType::StartloopAddrsOffset => {  },
-                                soundfont::data::GeneratorType::EndloopAddrsOffset => {  },
-                                soundfont::data::GeneratorType::StartAddrsCoarseOffset => {  },
-                                soundfont::data::GeneratorType::ModLfoToPitch => {  },
-                                soundfont::data::GeneratorType::VibLfoToPitch => {  },
-                                soundfont::data::GeneratorType::ModEnvToPitch => {  },
-                                soundfont::data::GeneratorType::InitialFilterFc => {  },
-                                soundfont::data::GeneratorType::InitialFilterQ => {  },
-                                soundfont::data::GeneratorType::ModLfoToFilterFc => {  },
-                                soundfont::data::GeneratorType::ModEnvToFilterFc => {  },
-                                soundfont::data::GeneratorType::EndAddrsCoarseOffset => {  },
-                                soundfont::data::GeneratorType::ModLfoToVolume => {  },
-                                soundfont::data::GeneratorType::Unused1 => {  },
-                                soundfont::data::GeneratorType::ChorusEffectsSend => {  },
-                                soundfont::data::GeneratorType::ReverbEffectsSend => {  },
-                                soundfont::data::GeneratorType::Pan => {
-                                    split_entry.smplpan = map_range((-500.0, 500.0), (0.0, 127.0), *gen.amount.as_i16().unwrap() as f64).round() as i8;
-                                },
-                                soundfont::data::GeneratorType::Unused2 => {  },
-                                soundfont::data::GeneratorType::Unused3 => {  },
-                                soundfont::data::GeneratorType::Unused4 => {  },
-                                soundfont::data::GeneratorType::DelayModLFO => {  },
-                                soundfont::data::GeneratorType::FreqModLFO => {  },
-                                soundfont::data::GeneratorType::DelayVibLFO => {  },
-                                soundfont::data::GeneratorType::FreqVibLFO => {  },
-                                soundfont::data::GeneratorType::DelayModEnv => {  },
-                                soundfont::data::GeneratorType::AttackModEnv => {  },
-                                soundfont::data::GeneratorType::HoldModEnv => {  },
-                                soundfont::data::GeneratorType::DecayModEnv => {  },
-                                soundfont::data::GeneratorType::SustainModEnv => {  },
-                                soundfont::data::GeneratorType::ReleaseModEnv => {  },
-                                soundfont::data::GeneratorType::KeynumToModEnvHold => {  },
-                                soundfont::data::GeneratorType::KeynumToModEnvDecay => {  },
-                                soundfont::data::GeneratorType::DelayVolEnv => {  },
-                                soundfont::data::GeneratorType::AttackVolEnv => {
-                                    attack = *gen.amount.as_i16().unwrap();
-                                },
-                                soundfont::data::GeneratorType::HoldVolEnv => {
-                                    hold = *gen.amount.as_i16().unwrap();
-                                },
-                                soundfont::data::GeneratorType::DecayVolEnv => {
-                                    decay = *gen.amount.as_i16().unwrap();
-                                },
-                                soundfont::data::GeneratorType::SustainVolEnv => {
-                                    let decibels = -gen.amount.as_i16().unwrap() as f64 / 10.0_f64;
-                                    split_entry.volume_envelope.sustain = (gain(decibels) * 127.0).round() as i8;
-                                },
-                                soundfont::data::GeneratorType::ReleaseVolEnv => {
-                                    release = *gen.amount.as_i16().unwrap();
-                                },
-                                soundfont::data::GeneratorType::KeynumToVolEnvHold => {  },
-                                soundfont::data::GeneratorType::KeynumToVolEnvDecay => {  },
-                                soundfont::data::GeneratorType::Instrument => {
-                                    possibly_a_global_zone = false;
-                                },
-                                soundfont::data::GeneratorType::Reserved1 => {  },
-                                soundfont::data::GeneratorType::KeyRange => {
-                                    let key_range_value = gen.amount.as_range().unwrap();
-                                    // let lowkey = ((key_range_value >> 8) & 0x00FF) as i8;
-                                    // let hikey = (key_range_value & 0x00FF) as i8;
-                                    split_entry.lowkey = key_range_value.low as i8;
-                                    split_entry.hikey = key_range_value.high as i8;
-                                },
-                                soundfont::data::GeneratorType::VelRange => {
-                                    let vel_range_value = gen.amount.as_range().unwrap();
-                                    split_entry.lovel = vel_range_value.low as i8;
-                                    split_entry.hivel = vel_range_value.high as i8;
-                                },
-                                soundfont::data::GeneratorType::StartloopAddrsCoarseOffset => {  },
-                                soundfont::data::GeneratorType::Keynum => {  },
-                                soundfont::data::GeneratorType::Velocity => {  },
-                                soundfont::data::GeneratorType::InitialAttenuation => {
-                                    let decibels = -gen.amount.as_i16().unwrap() as f64 / 10.0_f64;
-                                    split_entry.volume_envelope.atkvol = (gain(decibels) * 127.0).round() as i8;
-                                },
-                                soundfont::data::GeneratorType::Reserved2 => {  },
-                                soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
-                                soundfont::data::GeneratorType::CoarseTune => {
-                                    if !ftune_overflowed {
+                            // https://stackoverflow.com/questions/67016985/map-numeric-range-rust
+                            fn map_range(from_range: (f64, f64), to_range: (f64, f64), s: f64) -> f64 {
+                                to_range.0 + (s - from_range.0) * (to_range.1 - to_range.0) / (from_range.1 - from_range.0)
+                            }
+                            
+                            let mut possibly_a_global_zone = true;
+                            // Loop through all the generators in this zone
+                            let (mut attack, mut hold, mut decay, mut release) = (
+                                other_zones.iter().map(|x| x.gen_list.iter()).flatten()
+                                    .find(|g| g.ty == soundfont::data::GeneratorType::AttackVolEnv)
+                                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                                other_zones.iter().map(|x| x.gen_list.iter()).flatten()
+                                    .find(|g| g.ty == soundfont::data::GeneratorType::HoldVolEnv)
+                                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                                other_zones.iter().map(|x| x.gen_list.iter()).flatten()
+                                    .find(|g| g.ty == soundfont::data::GeneratorType::DecayVolEnv)
+                                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                                other_zones.iter().map(|x| x.gen_list.iter()).flatten()
+                                    .find(|g| g.ty == soundfont::data::GeneratorType::ReleaseVolEnv)
+                                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
+                            );
+                            let mut ftune_overflowed = false;
+                            for gen in zone.gen_list.iter() {
+                                match gen.ty {
+                                    soundfont::data::GeneratorType::StartAddrsOffset => {  },
+                                    soundfont::data::GeneratorType::EndAddrsOffset => {  },
+                                    soundfont::data::GeneratorType::StartloopAddrsOffset => {  },
+                                    soundfont::data::GeneratorType::EndloopAddrsOffset => {  },
+                                    soundfont::data::GeneratorType::StartAddrsCoarseOffset => {  },
+                                    soundfont::data::GeneratorType::ModLfoToPitch => {  },
+                                    soundfont::data::GeneratorType::VibLfoToPitch => {  },
+                                    soundfont::data::GeneratorType::ModEnvToPitch => {  },
+                                    soundfont::data::GeneratorType::InitialFilterFc => {  },
+                                    soundfont::data::GeneratorType::InitialFilterQ => {  },
+                                    soundfont::data::GeneratorType::ModLfoToFilterFc => {  },
+                                    soundfont::data::GeneratorType::ModEnvToFilterFc => {  },
+                                    soundfont::data::GeneratorType::EndAddrsCoarseOffset => {  },
+                                    soundfont::data::GeneratorType::ModLfoToVolume => {  },
+                                    soundfont::data::GeneratorType::Unused1 => {  },
+                                    soundfont::data::GeneratorType::ChorusEffectsSend => {  },
+                                    soundfont::data::GeneratorType::ReverbEffectsSend => {  },
+                                    soundfont::data::GeneratorType::Pan => {
+                                        split_entry.smplpan = map_range((-500.0, 500.0), (0.0, 127.0), *gen.amount.as_i16().unwrap() as f64).round() as i8;
+                                    },
+                                    soundfont::data::GeneratorType::Unused2 => {  },
+                                    soundfont::data::GeneratorType::Unused3 => {  },
+                                    soundfont::data::GeneratorType::Unused4 => {  },
+                                    soundfont::data::GeneratorType::DelayModLFO => {  },
+                                    soundfont::data::GeneratorType::FreqModLFO => {  },
+                                    soundfont::data::GeneratorType::DelayVibLFO => {  },
+                                    soundfont::data::GeneratorType::FreqVibLFO => {  },
+                                    soundfont::data::GeneratorType::DelayModEnv => {  },
+                                    soundfont::data::GeneratorType::AttackModEnv => {  },
+                                    soundfont::data::GeneratorType::HoldModEnv => {  },
+                                    soundfont::data::GeneratorType::DecayModEnv => {  },
+                                    soundfont::data::GeneratorType::SustainModEnv => {  },
+                                    soundfont::data::GeneratorType::ReleaseModEnv => {  },
+                                    soundfont::data::GeneratorType::KeynumToModEnvHold => {  },
+                                    soundfont::data::GeneratorType::KeynumToModEnvDecay => {  },
+                                    soundfont::data::GeneratorType::DelayVolEnv => {  },
+                                    soundfont::data::GeneratorType::AttackVolEnv => {
+                                        attack = *gen.amount.as_i16().unwrap();
+                                    },
+                                    soundfont::data::GeneratorType::HoldVolEnv => {
+                                        hold = *gen.amount.as_i16().unwrap();
+                                    },
+                                    soundfont::data::GeneratorType::DecayVolEnv => {
+                                        decay = *gen.amount.as_i16().unwrap();
+                                    },
+                                    soundfont::data::GeneratorType::SustainVolEnv => {
+                                        let decibels = -gen.amount.as_i16().unwrap() as f64 / 10.0_f64;
+                                        split_entry.volume_envelope.sustain = (gain(decibels) * 127.0).round() as i8;
+                                    },
+                                    soundfont::data::GeneratorType::ReleaseVolEnv => {
+                                        release = *gen.amount.as_i16().unwrap();
+                                    },
+                                    soundfont::data::GeneratorType::KeynumToVolEnvHold => {  },
+                                    soundfont::data::GeneratorType::KeynumToVolEnvDecay => {  },
+                                    soundfont::data::GeneratorType::Instrument => {
+                                        possibly_a_global_zone = false;
+                                    },
+                                    soundfont::data::GeneratorType::Reserved1 => {  },
+                                    soundfont::data::GeneratorType::KeyRange => {
+                                        let key_range_value = gen.amount.as_range().unwrap();
+                                        // let lowkey = ((key_range_value >> 8) & 0x00FF) as i8;
+                                        // let hikey = (key_range_value & 0x00FF) as i8;
+                                        split_entry.lowkey = key_range_value.low as i8;
+                                        split_entry.hikey = key_range_value.high as i8;
+                                    },
+                                    soundfont::data::GeneratorType::VelRange => {
+                                        let vel_range_value = gen.amount.as_range().unwrap();
+                                        split_entry.lovel = vel_range_value.low as i8;
+                                        split_entry.hivel = vel_range_value.high as i8;
+                                    },
+                                    soundfont::data::GeneratorType::StartloopAddrsCoarseOffset => {  },
+                                    soundfont::data::GeneratorType::Keynum => {  },
+                                    soundfont::data::GeneratorType::Velocity => {  },
+                                    soundfont::data::GeneratorType::InitialAttenuation => {
+                                        let decibels = -gen.amount.as_i16().unwrap() as f64 / 10.0_f64;
+                                        split_entry.volume_envelope.atkvol = (gain(decibels) * 127.0).round() as i8;
+                                    },
+                                    soundfont::data::GeneratorType::Reserved2 => {  },
+                                    soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
+                                    soundfont::data::GeneratorType::CoarseTune => {
+                                        if !ftune_overflowed {
+                                            let smpl;
+                                            if let Some(&sample_i) = zone.sample() {
+                                                smpl = &sample_infos[sample_i as usize];
+                                            } else if let Some(&sample_i) = other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten() {
+                                                smpl = &sample_infos[sample_i as usize];
+                                            } else {
+                                                println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
+                                                continue;
+                                            }
+                                            let (ctune, _) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).unwrap();
+                                            split_entry.ctune = *gen.amount.as_i16().unwrap() as i8 + ctune;
+                                        }
+                                    },
+                                    soundfont::data::GeneratorType::FineTune => {
                                         let smpl;
                                         if let Some(&sample_i) = zone.sample() {
                                             smpl = &sample_infos[sample_i as usize];
                                         } else if let Some(&sample_i) = other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten() {
                                             smpl = &sample_infos[sample_i as usize];
                                         } else {
-                                            println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
+                                            println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
                                             continue;
                                         }
-                                        let (ctune, _) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
-                                        split_entry.ctune = *gen.amount.as_i16().unwrap() as i8 + ctune;
-                                    }
-                                },
-                                soundfont::data::GeneratorType::FineTune => {
-                                    let smpl;
-                                    if let Some(&sample_i) = zone.sample() {
-                                        smpl = &sample_infos[sample_i as usize];
-                                    } else if let Some(&sample_i) = other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten() {
-                                        smpl = &sample_infos[sample_i as usize];
-                                    } else {
-                                        println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
-                                        continue;
-                                    }
-                                    let (ctune, ftune) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).expect("Could not calculate sample rate adjustment! Choose as supported output sample rate!!");
-                                    let tmp = *gen.amount.as_i16().unwrap() as i64 + ftune as i64;
-                                    let (ctune_delta, ftune) = cents_to_ctune_ftune(tmp);
-                                    if ctune_delta != 0 {
-                                        // Overflow!
-                                        ftune_overflowed = true;
-                                        split_entry.ctune = zone.gen_list
-                                            .iter()
-                                            .find(|g| g.ty == soundfont::data::GeneratorType::CoarseTune)
-                                            .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i8 + ctune + ctune_delta;
-                                    }
-                                    split_entry.ftune = ftune;
-                                },
-                                soundfont::data::GeneratorType::SampleID => {
-                                    possibly_a_global_zone = false;
-                                    // Check if the zone specifies which sample we have to use!
-                                    split_entry.SmplID = first_available_id as u16 + gen.amount.as_u16().unwrap();
-                                },
-                                soundfont::data::GeneratorType::SampleModes => {  },
-                                soundfont::data::GeneratorType::Reserved3 => {  },
-                                soundfont::data::GeneratorType::ScaleTuning => {  },
-                                soundfont::data::GeneratorType::ExclusiveClass => {  },
-                                soundfont::data::GeneratorType::OverridingRootKey => {
-                                    let val = *gen.amount.as_i16().unwrap();
-                                    if val != -1 {
-                                        split_entry.rootkey = val as i8;
-                                    }
-                                },
-                                soundfont::data::GeneratorType::Unused5 => {  },
-                                soundfont::data::GeneratorType::EndOper => {  },
-                            }
-                        }
-                        let (envmult, _) = timecents_to_index(*[attack, hold, decay, release].iter().max().unwrap());
-                        split_entry.volume_envelope.envmult = envmult;
-                        if envmult == 0 { // Use i32 lookup
-                            split_entry.volume_envelope.attack = lookup_env_time_value_i32(timecents_to_milliseconds(attack));
-                            split_entry.volume_envelope.hold = lookup_env_time_value_i32(timecents_to_milliseconds(hold));
-                            split_entry.volume_envelope.decay = lookup_env_time_value_i32(timecents_to_milliseconds(decay));
-                            split_entry.volume_envelope.release = lookup_env_time_value_i32(timecents_to_milliseconds(release));
-                        } else { // Use i16 lookup
-                            split_entry.volume_envelope.attack = lookup_env_time_value_i16(timecents_to_milliseconds(attack) as i16);
-                            split_entry.volume_envelope.hold = lookup_env_time_value_i16(timecents_to_milliseconds(hold) as i16);
-                            split_entry.volume_envelope.decay = lookup_env_time_value_i16(timecents_to_milliseconds(decay) as i16);
-                            split_entry.volume_envelope.release = lookup_env_time_value_i16(timecents_to_milliseconds(release) as i16);
-                        }
-                        
-                        possibly_a_global_zone && is_first_zone
-                    }
-
-                    /// Function to create splits from zones
-                    fn create_splits_from_zones(global_preset_zone: Option<&Zone>, preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> Vec<SplitEntry> {
-                        let mut splits = Vec::with_capacity(instrument_zones.len());
-                        let mut global_instrument_zone: Option<&Zone> = None;
-                        for (i, instrument_zone) in instrument_zones.iter().enumerate() {
-                            let mut split = SplitEntry::default();
-                            split.lowkey = 0;
-                            split.hikey = 127;
-                            split.lovel = 0;
-                            split.hivel = 127;
-                            if let Some(&sample_i) = instrument_zone.sample() {
-                                let smpl_ref = &sample_infos[sample_i as usize];
-                                split.ctune = smpl_ref.ctune;
-                                split.ftune = smpl_ref.ftune;
-                                split.rootkey = smpl_ref.rootkey;
-                                split.volume_envelope = smpl_ref.volume_envelope.clone();
-                            } else if i != 0 {
-                                println!("{}Some instrument zones contain no samples!", "Warning: ".yellow());
-                                continue;
-                            } else {
-                                split.ctune = 0;
-                                split.ftune = 0;
-                                split.rootkey = 60;
-                                split.volume_envelope = ADSRVolumeEnvelope::default();
-                                println!("{}", "Global instrument zone detected!".green());
-                            }
-                            split.smplvol = 127;
-                            split.smplpan = 64;
-                            split.kgrpid = 0;
-                            if let Some(global_preset_zone) = global_preset_zone {
-                                apply_zone_data_to_split(&mut split, global_preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
-                            }
-                            apply_zone_data_to_split(&mut split, preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
-                            if let Some(global_instrument_zone) = global_instrument_zone {
-                                apply_zone_data_to_split(&mut split, global_instrument_zone, false, &[preset_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
-                            }
-                            if apply_zone_data_to_split(&mut split, instrument_zone, i == 0, &(|| {
-                                let mut other_zones = Vec::new();
-                                if let Some(global_instrument_zone) = global_instrument_zone {
-                                    other_zones.push(global_instrument_zone);
+                                        let (ctune, ftune) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve).unwrap();
+                                        let tmp = *gen.amount.as_i16().unwrap() as i64 + ftune as i64;
+                                        let (ctune_delta, ftune) = cents_to_ctune_ftune(tmp);
+                                        if ctune_delta != 0 {
+                                            // Overflow!
+                                            ftune_overflowed = true;
+                                            split_entry.ctune = zone.gen_list
+                                                .iter()
+                                                .find(|g| g.ty == soundfont::data::GeneratorType::CoarseTune)
+                                                .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i8 + ctune + ctune_delta;
+                                        }
+                                        split_entry.ftune = ftune;
+                                    },
+                                    soundfont::data::GeneratorType::SampleID => {
+                                        possibly_a_global_zone = false;
+                                        // Check if the zone specifies which sample we have to use!
+                                        split_entry.SmplID = first_available_id as u16 + gen.amount.as_u16().unwrap();
+                                    },
+                                    soundfont::data::GeneratorType::SampleModes => {  },
+                                    soundfont::data::GeneratorType::Reserved3 => {  },
+                                    soundfont::data::GeneratorType::ScaleTuning => {  },
+                                    soundfont::data::GeneratorType::ExclusiveClass => {  },
+                                    soundfont::data::GeneratorType::OverridingRootKey => {
+                                        let val = *gen.amount.as_i16().unwrap();
+                                        if val != -1 {
+                                            split_entry.rootkey = val as i8;
+                                        }
+                                    },
+                                    soundfont::data::GeneratorType::Unused5 => {  },
+                                    soundfont::data::GeneratorType::EndOper => {  },
                                 }
-                                other_zones.push(preset_zone);
+                            }
+                            let (envmult, _) = timecents_to_index(*[attack, hold, decay, release].iter().max().unwrap());
+                            split_entry.volume_envelope.envmult = envmult;
+                            if envmult == 0 { // Use i32 lookup
+                                split_entry.volume_envelope.attack = lookup_env_time_value_i32(timecents_to_milliseconds(attack));
+                                split_entry.volume_envelope.hold = lookup_env_time_value_i32(timecents_to_milliseconds(hold));
+                                split_entry.volume_envelope.decay = lookup_env_time_value_i32(timecents_to_milliseconds(decay));
+                                split_entry.volume_envelope.release = lookup_env_time_value_i32(timecents_to_milliseconds(release));
+                            } else { // Use i16 lookup
+                                split_entry.volume_envelope.attack = lookup_env_time_value_i16(timecents_to_milliseconds(attack) as i16);
+                                split_entry.volume_envelope.hold = lookup_env_time_value_i16(timecents_to_milliseconds(hold) as i16);
+                                split_entry.volume_envelope.decay = lookup_env_time_value_i16(timecents_to_milliseconds(decay) as i16);
+                                split_entry.volume_envelope.release = lookup_env_time_value_i16(timecents_to_milliseconds(release) as i16);
+                            }
+                            
+                            possibly_a_global_zone && is_first_zone
+                        }
+
+                        /// Function to create splits from zones
+                        fn create_splits_from_zones(global_preset_zone: Option<&Zone>, preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> Vec<SplitEntry> {
+                            let mut splits = Vec::with_capacity(instrument_zones.len());
+                            let mut global_instrument_zone: Option<&Zone> = None;
+                            for (i, instrument_zone) in instrument_zones.iter().enumerate() {
+                                let mut split = SplitEntry::default();
+                                split.lowkey = 0;
+                                split.hikey = 127;
+                                split.lovel = 0;
+                                split.hivel = 127;
+                                if let Some(&sample_i) = instrument_zone.sample() {
+                                    let smpl_ref = &sample_infos[sample_i as usize];
+                                    split.ctune = smpl_ref.ctune;
+                                    split.ftune = smpl_ref.ftune;
+                                    split.rootkey = smpl_ref.rootkey;
+                                    split.volume_envelope = smpl_ref.volume_envelope.clone();
+                                } else if i != 0 {
+                                    println!("{}Some instrument zones contain no samples!", "Warning: ".yellow());
+                                    continue;
+                                } else {
+                                    split.ctune = 0;
+                                    split.ftune = 0;
+                                    split.rootkey = 60;
+                                    split.volume_envelope = ADSRVolumeEnvelope::default();
+                                    println!("{}", "Global instrument zone detected!".green());
+                                }
+                                split.smplvol = 127;
+                                split.smplpan = 64;
+                                split.kgrpid = 0;
                                 if let Some(global_preset_zone) = global_preset_zone {
-                                    other_zones.push(global_preset_zone);
+                                    apply_zone_data_to_split(&mut split, global_preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
                                 }
-                                other_zones
-                            })(), sample_infos, first_available_id, sample_rate_adjustment_curve) {
-                                global_instrument_zone = Some(instrument_zone);
+                                apply_zone_data_to_split(&mut split, preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
+                                if let Some(global_instrument_zone) = global_instrument_zone {
+                                    apply_zone_data_to_split(&mut split, global_instrument_zone, false, &[preset_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
+                                }
+                                if apply_zone_data_to_split(&mut split, instrument_zone, i == 0, &(|| {
+                                    let mut other_zones = Vec::new();
+                                    if let Some(global_instrument_zone) = global_instrument_zone {
+                                        other_zones.push(global_instrument_zone);
+                                    }
+                                    other_zones.push(preset_zone);
+                                    if let Some(global_preset_zone) = global_preset_zone {
+                                        other_zones.push(global_preset_zone);
+                                    }
+                                    other_zones
+                                })(), sample_infos, first_available_id, sample_rate_adjustment_curve) {
+                                    global_instrument_zone = Some(instrument_zone);
+                                }
+                                splits.push(split);
                             }
-                            splits.push(split);
+                            splits
                         }
-                        splits
+
+                        // Create splits
+                        let mut global_preset_zone: Option<&Zone> = None;
+                        let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
+                            if let Some(&instrument_i) = preset_zone.instrument() {
+                                let instrument = &sf2.instruments[instrument_i as usize];
+                                create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, &sample_infos, first_available_id, sample_rate_adjustment_curve)
+                            } else if i == 0 {
+                                global_preset_zone = Some(preset_zone);
+                                println!("{}", "Global preset zone detected!".green());
+                                Vec::new()
+                            } else {
+                                println!("{}Some preset zones contain no instruments!", "Warning: ".yellow());
+                                Vec::new()
+                            }
+                        }).flatten().enumerate().map(|(i, mut x)| {
+                            x.id = i as u8;
+                            x
+                        }).collect();
+                        program_info.splits_table.objects = splits;
+
+                        // Add to the prgi chunk
+                        prgi_pointer_table.objects.push(program_info);
                     }
-
-                    // Create splits
-                    let mut global_preset_zone: Option<&Zone> = None;
-                    let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
-                        if let Some(&instrument_i) = preset_zone.instrument() {
-                            let instrument = &sf2.instruments[instrument_i as usize];
-                            create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, &track_swdl.wavi.data.objects, first_available_id, *sample_rate_adjustment_curve)
-                        } else if i == 0 {
-                            global_preset_zone = Some(preset_zone);
-                            println!("{}", "Global preset zone detected!".green());
-                            Vec::new()
-                        } else {
-                            println!("{}Some preset zones contain no instruments!", "Warning: ".yellow());
-                            Vec::new()
-                        }
-                    }).flatten().enumerate().map(|(i, mut x)| {
-                        x.id = i as u8;
-                        x
-                    }).collect();
-                    program_info.splits_table.objects = splits;
-
-                    // Add to the prgi chunk
-                    track_swdl_prgi.data.objects.push(program_info);
+                    prgi_pointer_table
                 }
-                track_swdl.prgi = Some(track_swdl_prgi);
+
+                fn create_track_swdl(last_modified: (u16, u8, u8, u8, u8, u8, u8), fname: String) -> Result<SWDL, DSEError> {
+                    let mut track_swdl = SWDL::default();
+                    let (year, month, day, hour, minute, second, centisecond) = last_modified;
+                    track_swdl.header.version = 0x415;
+                    track_swdl.header.year = year;
+                    track_swdl.header.month = month;
+                    track_swdl.header.day = day;
+                    track_swdl.header.hour = hour;
+                    track_swdl.header.minute = minute;
+                    track_swdl.header.second = second;
+                    track_swdl.header.centisecond = centisecond;
+
+                    track_swdl.header.fname = DSEString::<0xAA>::try_from(fname)?;
+
+                    Ok(track_swdl)
+                }
+
+                let (first_id, sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, |(i, sample_header)| true)?;
+
+                // Create a blank track SWDL file
+                let mut fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
+                    .to_str().ok_or(DSEError::DSEFileNameConversionNonUTF8("SF2".to_string(), input_file_path.display().to_string()))?
+                    .to_string();
+                if !fname.is_ascii() {
+                    return Err(DSEError::DSEFileNameConversionNonASCII("SF2".to_string(), fname));
+                }
+                fname.truncate(15);
+
+                let mut track_swdl = create_track_swdl(get_file_last_modified_date_with_default(&input_file_path)?, fname)?;
+                let prgi_pointer_table = copy_presets(&sf2, &sample_infos, first_id, *sample_rate_adjustment_curve);
+
+                // Add the sample info objects we created before
+                track_swdl.wavi.data.objects = sample_infos;
+                let mut prgi = PRGIChunk::new(0);
+                prgi.data = prgi_pointer_table;
+                track_swdl.prgi = Some(prgi);
 
                 // Keygroups
                 let mut track_swdl_kgrp = KGRPChunk::default();
@@ -701,13 +675,13 @@ pub fn cents_to_ctune_ftune(mut cents: i64) -> (i8, i8) {
     }
     (sign * ctune as i8, sign * ftune as i8)
 }
-pub fn sample_rate_adjustment_3(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+pub fn sample_rate_adjustment_3(sample_rate: f64) -> Result<(i8, i8), DSEError> {
     Ok(cents_to_ctune_ftune(sample_rate_adjustment_in_cents(sample_rate) as i64))
 }
-pub fn sample_rate_adjustment_1(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+pub fn sample_rate_adjustment_1(sample_rate: f64) -> Result<(i8, i8), DSEError> {
     Ok(cents_to_ctune_ftune((1200.0 * (sample_rate / 32728.5).log2()).round() as i64))
 }
-pub fn sample_rate_adjustment_4(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+pub fn sample_rate_adjustment_4(sample_rate: f64) -> Result<(i8, i8), DSEError> {
     Ok(cents_to_ctune_ftune((1200.0 * (sample_rate / 32728.5).log2()).round() as i64 - 100))
 }
 static SAMPLE_RATE_ADJUSTMENT_TABLE: phf::Map<u32, i64> = phf_map! {
@@ -748,22 +722,22 @@ static SAMPLE_RATE_ADJUSTMENT_TABLE: phf::Map<u32, i64> = phf_map! {
     44225_u32 => 554_i64,	44249_u32 => 557_i64,	44539_u32 => 586_i64,	45158_u32 => 391_i64,	
     45264_u32 => 401_i64,	45656_u32 => 439_i64
 };
-pub fn sample_rate_adjustment_2(sample_rate: f64) -> Result<(i8, i8), SWDLToolError> {
+pub fn sample_rate_adjustment_2(sample_rate: f64) -> Result<(i8, i8), DSEError> {
     let smplrate = sample_rate.round() as u32;
     if let Some(&cents) = SAMPLE_RATE_ADJUSTMENT_TABLE.get(&smplrate) {
         println!("{:?}", cents_to_ctune_ftune(cents));
         Ok(cents_to_ctune_ftune(cents))
     } else {
-        Err(SWDLToolError::new("Target sample rate unsupported! Cannot determine its adjustment value!!"))
+        Err(DSEError::SampleRateUnsupported(sample_rate))
     }
 }
-pub fn sample_rate_adjustment(sample_rate: f64, curve: usize) -> Result<(i8, i8), SWDLToolError> {
+pub fn sample_rate_adjustment(sample_rate: f64, curve: usize) -> Result<(i8, i8), DSEError> {
     match curve {
         1 => sample_rate_adjustment_1(sample_rate),
         2 => sample_rate_adjustment_2(sample_rate),
         3 => sample_rate_adjustment_3(sample_rate),
         4 => sample_rate_adjustment_4(sample_rate),
-        _ => Err(SWDLToolError::new("Invalid sample rate adjustment curve number!"))
+        _ => Err(DSEError::Invalid("Invalid sample rate adjustment curve number!".to_string()))
     }
 }
 

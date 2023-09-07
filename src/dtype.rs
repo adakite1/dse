@@ -6,6 +6,95 @@ use serde::{Serialize, Deserialize};
 
 use crate::swdl::{ADSRVolumeEnvelope, DSEString};
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum DSEError {
+    // #[error("data store disconnected")]
+    // Disconnect(#[from] io::Error),
+    // #[error("the data for key `{0}` is not available")]
+    // Redaction(String),
+    // #[error("invalid header (expected {expected:?}, found {found:?})")]
+    // InvalidHeader {
+    //     expected: String,
+    //     found: String,
+    // },
+    // #[error("unknown data store error")]
+    // Unknown,
+
+    #[error("IO Error: {0}")]
+    IOError(#[from] std::io::Error),
+    #[error("Deserialize Error: {0}")]
+    DeserializeError(#[from] quick_xml::DeError),
+    #[error("SoundFont Parse Error: {0}")]
+    SoundFontParseError(String),
+    #[error("MIDI Parse Error: {0}")]
+    SmfParseError(String),
+    #[error("Glob Pattern Error: {0}")]
+    GlobPatternError(#[from] glob::PatternError),
+
+    #[error("Failed to find sample {0} at {1}.")]
+    SampleFindError(String, u64),
+    #[error("Failed to read sample {0} at {1}, expected sample length is {2} bytes.")]
+    SampleReadError(String, u64, usize),
+    #[error("Target sample rate {0} unsupported by the lookup table! Cannot determine its adjustment value!!")]
+    SampleRateUnsupported(f64),
+
+    #[error("{0}")]
+    Invalid(String),
+    #[error("Couldn't convert filename for {0} file with path '{1}' into a UTF-8 Rust String. Filenames should be pure-ASCII only!")]
+    DSEFileNameConversionNonUTF8(String, String),
+    #[error("Couldn't convert filename for {0} file with path '{1}' into an ASCII string. Filenames should be pure-ASCII only!")]
+    DSEFileNameConversionNonASCII(String, String),
+    #[error("Cannot create `DSEString` from the provided value '{0}'! String contains non-ASCII characters!")]
+    DSEStringConversionNonASCII(String),
+    #[error("Cannot create `DSEString` from the provided value '{0}'! String contains more than 15 characters! ({1} characters)")]
+    DSEStringConversionLengthError(String, usize),
+    #[error("Invalid other event code '{0}'! It's not within acceptable range!")]
+    DSEEventLookupError(u8),
+    #[error("Invalid other event name '{0}'!!")]
+    DSEEventNameLookupError(String),
+    #[error("Only ticks/beat is supported currently as a timing specifier!")]
+    DSESmfUnsupportedTimingSpecifier(),
+    #[error("Sequencial MIDI files are not supported!")]
+    DSESequencialSmfUnsupported(),
+    #[error("MIDI contains too many tracks to be converted to Smf0 format!")]
+    DSESmf0TooManyTracks(),
+    #[error("Table<T> write_to_file: Self-index of object {0} is {0}. The self-index of an object in a table must match its actual index in the table!!")]
+    TableNonMatchingSelfIndex(usize, usize),
+    #[error("PointerTable<T> write_to_file: The self-index of an object in a pointer table must be unique!!")]
+    PointerTableDuplicateSelfIndex(),
+    #[error("SWDL must contain a prgi chunk!")]
+    DSESmdConverterSwdEmpty(),
+
+    #[error("MIDI messages too far apart to be converted into the Smf0 format!")]
+    DSESmf0MessagesTooFarApart(),
+    #[error("Some notes are too long to be converted!")]
+    DSESmfNotesTooLong(),
+
+    // Internal errors: these should theoretically never happen
+    #[error("Seek failed!")]
+    _InMemorySeekFailed(),
+    #[error("Write failed!")]
+    _InMemoryWriteFailed(),
+    #[error("Valid dynamic field access failed!")]
+    _ValidDynamicFieldAccessFailed(),
+    #[error("Valid dynamic field downcast failed!")]
+    _ValidDynamicFieldDowncastFailed(),
+    #[error("`bevy_reflect` dynamic type info access failed!")]
+    _DynamicTypeInfoAccessFailed(),
+    #[error("Failed to read the filename of file '{0}'!")]
+    _FileNameReadFailed(String),
+    #[error("Failed to remove a valid key from a HashMap!")]
+    _ValidHashMapKeyRemovalFailed(),
+    #[error("Corresponding note on event with known index missing!")]
+    _CorrespondingNoteOnNotFound(),
+
+    // Intended for use when a function wants to delegate the elaboration of an error to its parent caller
+    #[error("Parent caller should have overwritten this")]
+    Placeholder()
+}
+
 #[repr(i8)]
 pub enum DSEPan {
     FullLeft = 0,
@@ -70,48 +159,32 @@ impl<const V: u8, const U: usize> GenericDefaultByteArray<V, U> {
     }
 }
 
-
-/// Generic Error to represent a variety of errors
-#[derive(Debug, Clone)]
-pub struct GenericError(String);
-impl GenericError {
-    pub fn new(message: &str) -> GenericError {
-        GenericError(String::from(message))
-    }
-}
-impl std::fmt::Display for GenericError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", &self.0)
-    }
-}
-impl std::error::Error for GenericError {  }
-
 pub trait AutoReadWrite: Reflect + Struct + Default {  }
 pub trait ReadWrite {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>>;
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>>;
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError>;
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError>;
 }
 impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = 0;
         for field_i in 0..self.field_len() {
-            let field = self.field_at(field_i).ok_or("Failed to get field!")?;
-            let type_info = field.get_represented_type_info().ok_or("Failed to get type info of field!")?;
+            let field = self.field_at(field_i).ok_or(DSEError::_ValidDynamicFieldAccessFailed())?;
+            let type_info = field.get_represented_type_info().ok_or(DSEError::_DynamicTypeInfoAccessFailed())?;
             match type_info {
                 bevy_reflect::TypeInfo::Array(array_info) => {
                     let capacity = array_info.capacity();
                     if array_info.item_type_name() == "u8" {
                         if capacity == 2 {
-                            writer.write_all(field.as_any().downcast_ref::<[u8; 2]>().ok_or("Error in bevy_reflect!")?)?;
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 2]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                             bytes_written += 2;
                         } else if capacity == 4 {
-                            writer.write_all(field.as_any().downcast_ref::<[u8; 4]>().ok_or("Error in bevy_reflect!")?)?;
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 4]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                             bytes_written += 4;
                         } else if capacity == 8 {
-                            writer.write_all(field.as_any().downcast_ref::<[u8; 8]>().ok_or("Error in bevy_reflect!")?)?;
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 8]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                             bytes_written += 8;
                         } else if capacity == 16 {
-                            writer.write_all(field.as_any().downcast_ref::<[u8; 16]>().ok_or("Error in bevy_reflect!")?)?;
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 16]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                             bytes_written += 16;
                         } else {
                             panic!("Unsupported auto type!");
@@ -122,25 +195,25 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 },
                 bevy_reflect::TypeInfo::Value(value_info) => {
                     if value_info.type_name() == "bool" {
-                        writer.write_u8(*field.as_any().downcast_ref::<bool>().ok_or("Error in bevy_reflect!")? as u8)?;
+                        writer.write_u8(*field.as_any().downcast_ref::<bool>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? as u8)?;
                         bytes_written += 1;
                     } else if value_info.type_name() == "u8" {
-                        writer.write_u8(*field.as_any().downcast_ref::<u8>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_u8(*field.as_any().downcast_ref::<u8>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                         bytes_written += 1;
                     } else if value_info.type_name() == "u16" {
-                        writer.write_u16::<LittleEndian>(*field.as_any().downcast_ref::<u16>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_u16::<LittleEndian>(*field.as_any().downcast_ref::<u16>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                         bytes_written += 2;
                     } else if value_info.type_name() == "u32" {
-                        writer.write_u32::<LittleEndian>(*field.as_any().downcast_ref::<u32>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_u32::<LittleEndian>(*field.as_any().downcast_ref::<u32>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                         bytes_written += 4;
                     } else if value_info.type_name() == "i8" {
-                        writer.write_i8(*field.as_any().downcast_ref::<i8>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_i8(*field.as_any().downcast_ref::<i8>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                         bytes_written += 1;
                     } else if value_info.type_name() == "i16" {
-                        writer.write_i16::<LittleEndian>(*field.as_any().downcast_ref::<i16>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_i16::<LittleEndian>(*field.as_any().downcast_ref::<i16>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                         bytes_written += 2;
                     } else if value_info.type_name() == "i32" {
-                        writer.write_i32::<LittleEndian>(*field.as_any().downcast_ref::<i32>().ok_or("Error in bevy_reflect!")?)?;
+                        writer.write_i32::<LittleEndian>(*field.as_any().downcast_ref::<i32>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                         bytes_written += 4;
                     } else {
                         panic!("Unsupported auto type!");
@@ -162,22 +235,22 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
         }
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, file: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, file: &mut R) -> Result<(), DSEError> {
         for field_i in 0..self.field_len() {
-            let field = self.field_at_mut(field_i).ok_or("Failed to get field!")?;
-            let type_info = field.get_represented_type_info().ok_or("Failed to get type info of field!")?;
+            let field = self.field_at_mut(field_i).ok_or(DSEError::_ValidDynamicFieldAccessFailed())?;
+            let type_info = field.get_represented_type_info().ok_or(DSEError::_DynamicTypeInfoAccessFailed())?;
             match type_info {
                 bevy_reflect::TypeInfo::Array(array_info) => {
                     let capacity = array_info.capacity();
                     if array_info.item_type_name() == "u8" {
                         if capacity == 2 {
-                            *field.as_any_mut().downcast_mut::<[u8; 2]>().ok_or("Error in bevy_reflect!")? = read_n_bytes!(file, 2)?;
+                            *field.as_any_mut().downcast_mut::<[u8; 2]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 2)?;
                         } else if capacity == 4 {
-                            *field.as_any_mut().downcast_mut::<[u8; 4]>().ok_or("Error in bevy_reflect!")? = read_n_bytes!(file, 4)?;
+                            *field.as_any_mut().downcast_mut::<[u8; 4]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 4)?;
                         } else if capacity == 8 {
-                            *field.as_any_mut().downcast_mut::<[u8; 8]>().ok_or("Error in bevy_reflect!")? = read_n_bytes!(file, 8)?;
+                            *field.as_any_mut().downcast_mut::<[u8; 8]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 8)?;
                         } else if capacity == 16 {
-                            *field.as_any_mut().downcast_mut::<[u8; 16]>().ok_or("Error in bevy_reflect!")? = read_n_bytes!(file, 16)?;
+                            *field.as_any_mut().downcast_mut::<[u8; 16]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 16)?;
                         } else {
                             panic!("Unsupported auto type!");
                         }
@@ -187,19 +260,19 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                 },
                 bevy_reflect::TypeInfo::Value(value_info) => {
                     if value_info.type_name() == "bool" {
-                        *field.as_any_mut().downcast_mut::<bool>().ok_or("Error in bevy_reflect!")? = file.read_u8()? != 0;
+                        *field.as_any_mut().downcast_mut::<bool>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_u8()? != 0;
                     } else if value_info.type_name() == "u8" {
-                        *field.as_any_mut().downcast_mut::<u8>().ok_or("Error in bevy_reflect!")? = file.read_u8()?;
+                        *field.as_any_mut().downcast_mut::<u8>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_u8()?;
                     } else if value_info.type_name() == "u16" {
-                        *field.as_any_mut().downcast_mut::<u16>().ok_or("Error in bevy_reflect!")? = file.read_u16::<LittleEndian>()?;
+                        *field.as_any_mut().downcast_mut::<u16>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_u16::<LittleEndian>()?;
                     } else if value_info.type_name() == "u32" {
-                        *field.as_any_mut().downcast_mut::<u32>().ok_or("Error in bevy_reflect!")? = file.read_u32::<LittleEndian>()?;
+                        *field.as_any_mut().downcast_mut::<u32>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_u32::<LittleEndian>()?;
                     } else if value_info.type_name() == "i8" {
-                        *field.as_any_mut().downcast_mut::<i8>().ok_or("Error in bevy_reflect!")? = file.read_i8()?;
+                        *field.as_any_mut().downcast_mut::<i8>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_i8()?;
                     } else if value_info.type_name() == "i16" {
-                        *field.as_any_mut().downcast_mut::<i16>().ok_or("Error in bevy_reflect!")? = file.read_i16::<LittleEndian>()?;
+                        *field.as_any_mut().downcast_mut::<i16>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_i16::<LittleEndian>()?;
                     } else if value_info.type_name() == "i32" {
-                        *field.as_any_mut().downcast_mut::<i32>().ok_or("Error in bevy_reflect!")? = file.read_i32::<LittleEndian>()?;
+                        *field.as_any_mut().downcast_mut::<i32>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = file.read_i32::<LittleEndian>()?;
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -224,10 +297,10 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
 
 /// Binary blob
 impl ReadWrite for Vec<u8> {
-    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Write>(&self, writer: &mut W) -> Result<usize, DSEError> {
         Ok(writer.write_all(&self).map(|_| self.len())?)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         Ok(reader.read_exact(self)?)
     }
 }
@@ -245,7 +318,7 @@ impl ReadWrite for Vec<u8> {
 ///  However, if one or more index conflicts emerge, the code **will** panic.
 pub trait IsSelfIndexed {
     fn is_self_indexed(&self) -> Option<usize>;
-    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>>;
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), DSEError>;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -272,19 +345,19 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> Table<T> {
     }
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for Table<T> {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = 0;
         for (i, object) in self.objects.iter().enumerate() {
             if let Some(self_index) = object.is_self_indexed() {
                 if self_index != i {
-                    panic!("Table<T> write_to_file: Self-index of object {} is {}. The self-index of an object in a table must match its actual index in the table!!", i, self_index);
+                    return Err(DSEError::TableNonMatchingSelfIndex(i, self_index));
                 }
             }
             bytes_written += object.write_to_file(writer)?;
         }
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         for _ in 0..self._read_n {
             let mut object = T::default();
             object.read_from_file(reader)?;
@@ -315,6 +388,9 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         self._chunk_len = chunk_len;
     }
     pub fn slots(&self) -> usize {
+        if self.objects.len() == 0 {
+            return 0;
+        }
         if let Some(_) = self.objects[0].is_self_indexed() {
             self.objects.iter().map(|x| x.is_self_indexed().unwrap()).max().unwrap() + 1
         } else {
@@ -330,7 +406,7 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     }
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTable<T> {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let pointer_table_byte_len = self.slots() * 2;
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
         let first_pointer = pointer_table_byte_len_aligned;
@@ -345,10 +421,11 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTa
             if writer.read_u16::<LittleEndian>()? == 0 {
                 // Pointer has not been written in yet
                 writer.seek(SeekFrom::Current(-2))?;
-                writer.write_u16::<LittleEndian>((first_pointer + accumulated_write).try_into()?)?;
+                println!("{} pointer", first_pointer + accumulated_write);
+                writer.write_u16::<LittleEndian>((first_pointer + accumulated_write).try_into().map_err(|_| DSEError::Placeholder())?)?;
             } else {
                 // Overlapping pointers!
-                panic!("PointerTable<T> write_to_file: The self-index of an object in a pointer table must be unique!!")
+                return Err(DSEError::PointerTableDuplicateSelfIndex())
             }
             accumulated_write += val.write_to_file(&mut accumulated_object_data_cursor)?;
         }
@@ -358,9 +435,10 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTa
             writer.write_u8(0xAA)?;
         }
         writer.write_all(&accumulated_object_data)?;
+        println!("==============================");
         Ok(pointer_table_byte_len_aligned + accumulated_object_data.len())
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         let start_of_pointer_table = reader.seek(SeekFrom::Current(0))?;
         for i in 0..self._read_n {
             let twobyte_offset_from_start_of_pointer_table = reader.read_u16::<LittleEndian>()?;

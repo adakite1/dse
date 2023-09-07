@@ -247,7 +247,7 @@ pub mod events {
     use phf::phf_ordered_map;
     use serde::{Serialize, Deserialize};
 
-    use crate::dtype::{ReadWrite, GenericError};
+    use crate::dtype::{ReadWrite, DSEError};
 
     #[derive(Debug, Default, Serialize, Deserialize)]
     pub struct PlayNote {
@@ -260,12 +260,12 @@ pub mod events {
         pub keydownduration: u32
     }
     impl ReadWrite for PlayNote {
-        fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
             writer.write_u8(self.velocity)?;
 
             let mut keydownduration = [0_u8; 4];
             if self.keydownduration > 0xFFFFFF {
-                return Err(Box::new(GenericError::new("Keydown duration needs to be within the range 0 to 0xFFFFFF")))?;
+                return Err(DSEError::Invalid("Keydown duration needs to be within the range 0 to 0xFFFFFF".to_string()))?;
             }
             (&mut keydownduration[..]).write_u32::<LittleEndian>(self.keydownduration)?;
             let mut keydowndurationlen = 0_u8;
@@ -282,7 +282,7 @@ pub mod events {
             writer.write_all(&keydownduration[..keydowndurationlen as usize])?;
             Ok(2 + keydowndurationlen as usize)
         }
-        fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+        fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
             self.velocity = reader.read_u8()?;
             let note_data = reader.read_u8()?;
             self._nbparambytes = (note_data & 0b11000000) >> 6;
@@ -305,11 +305,11 @@ pub mod events {
         duration: u8,
     }
     impl ReadWrite for FixedDurationPause {
-        fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+        fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
             writer.write_u8(self.duration)?;
             Ok(1)
         }
-        fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+        fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
             self.duration = reader.read_u8()?;
             Ok(())
         }
@@ -451,10 +451,10 @@ pub mod events {
         pub parameters: [u8; 5]
     }
     impl Other {
-        pub fn lookup(v: u8) -> Result<(&'static &'static str, &'static (bool, u8, u8)), GenericError> {
-            CODE_TRANSLATIONS.index(v as usize - 0x90).ok_or(GenericError::new("Invalid 'Other' event, code is not within acceptable range!"))
+        pub fn lookup(v: u8) -> Result<(&'static &'static str, &'static (bool, u8, u8)), DSEError> {
+            CODE_TRANSLATIONS.index(v as usize - 0x90).ok_or(DSEError::DSEEventLookupError(v))
         }
-        pub fn name_to_code(name: &str) -> Result<u8, Box<dyn std::error::Error>> {
+        pub fn name_to_code(name: &str) -> Result<u8, DSEError> {
             if let Some(&(_, code, _)) = CODE_TRANSLATIONS.get(name) {
                 Ok(code)
             } else if let Ok(code_u8) = name.parse::<u8>() {
@@ -462,7 +462,7 @@ pub mod events {
             } else if let Ok(code_u8) = u8::from_str_radix(name.trim_start_matches("0x"), 16) {
                 Ok(code_u8)
             } else {
-                Err(Box::new(GenericError::new("invalid 'Other' event name!")))
+                Err(DSEError::DSEEventNameLookupError(name.to_string()))
             }
         }
         pub fn is_eot_event(&self) -> bool {
@@ -470,15 +470,15 @@ pub mod events {
         }
     }
     impl ReadWrite for Other {
-        fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
-            let (_, &(_, _, nbparams)) = CODE_TRANSLATIONS.index(self.code as usize - 0x90).ok_or(GenericError::new("Invalid 'Other' event, code is not within acceptable range!"))?;
+        fn write_to_file<W: std::io::Read + std::io::Write + std::io::Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+            let (_, &(_, _, nbparams)) = CODE_TRANSLATIONS.index(self.code as usize - 0x90).ok_or(DSEError::DSEEventLookupError(self.code))?;
             writer.write_u8(self.code)?;
             writer.write_all(&self.parameters[..nbparams as usize])?;
             Ok(1 + nbparams as usize)
         }
-        fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+        fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
             self.code = reader.read_u8()?;
-            let (_, &(_, _, nbparams)) = CODE_TRANSLATIONS.index(self.code as usize - 0x90).ok_or(GenericError::new("Invalid 'Other' event, code is not within acceptable range!"))?;
+            let (_, &(_, _, nbparams)) = CODE_TRANSLATIONS.index(self.code as usize - 0x90).ok_or(DSEError::DSEEventLookupError(self.code))?;
             for i in 0..nbparams as usize {
                 self.parameters[i] = reader.read_u8()?;
             }
@@ -507,14 +507,14 @@ impl DSEEvent {
     }
 }
 impl ReadWrite for DSEEvent {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         match self {
             DSEEvent::PlayNote(event) => event.write_to_file(writer),
             DSEEvent::FixedDurationPause(event) => event.write_to_file(writer),
             DSEEvent::Other(event) => event.write_to_file(writer)
         }
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         match peek_byte!(reader)? {
             0x0..=0x7F => {
                 let mut event = events::PlayNote::default();
@@ -557,26 +557,25 @@ impl TrkEvents {
     }
 }
 impl ReadWrite for TrkEvents {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = 0;
         for event in &self.events {
             bytes_written += event.write_to_file(writer)?;
         }
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         let _trk_events_len = self._read_n - 4; // Subtract the preamble's length!
         let start_cursor_pos = reader.seek(SeekFrom::Current(0))?; // Failsafe
         let mut current_cursor_pos;
         let mut evt;
-        let mut read_event = || -> Result<(DSEEvent, u64), Box<dyn std::error::Error>> {
+        let mut read_event = || -> Result<(DSEEvent, u64), DSEError> {
             let mut event = DSEEvent::default();
             event.read_from_file(reader)?;
             Ok((event, reader.seek(SeekFrom::Current(0))?))
         };
         (evt, current_cursor_pos) = read_event()?;
         self.events.push(evt);
-        // while !self.events.last().unwrap().is_eot_event() {
         while current_cursor_pos < start_cursor_pos + _trk_events_len {
             (evt, current_cursor_pos) = read_event()?;
             self.events.push(evt);
@@ -609,7 +608,7 @@ impl Default for TrkChunk {
     }
 }
 impl ReadWrite for TrkChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = self.header.write_to_file(writer)?;
         bytes_written += self.preamble.write_to_file(writer)?;
         bytes_written += self.events.write_to_file(writer)?;
@@ -620,7 +619,7 @@ impl ReadWrite for TrkChunk {
         }
         Ok(bytes_written_aligned)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.preamble.read_from_file(reader)?;
         self.events.set_read_params(self.header.chunklen as u64);
@@ -637,10 +636,10 @@ impl IsSelfIndexed for TrkChunk {
         // Some(self.preamble.trkid as usize)
         None
     }
-    fn change_self_index(&mut self, _: usize) -> Result<(), Box<dyn std::error::Error>> {
+    fn change_self_index(&mut self, _: usize) -> Result<(), DSEError> {
         // self.preamble.trkid = new_index.try_into()?;
         // Ok(())
-        Err(Box::new(GenericError::new("Track chunks do not have indices!!")))
+        Err(DSEError::Invalid("Track chunks do not have indices!!".to_string()))
     }
 }
 
@@ -681,11 +680,11 @@ pub struct SMDL {
     pub eoc: EOCChunk
 }
 impl SMDL {
-    pub fn regenerate_read_markers(&mut self) -> Result<(), Box<dyn std::error::Error>> { //TODO: make more efficient
+    pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
         self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
         self.song.nbtrks = self.trks.len() as u8;
-        self.song.nbchans = self.trks.objects.iter().map(|x| x.preamble.chanid).max().ok_or(GenericError::new("SMDL file contains zero tracks! Unable to automatically determine number of channels used!!"))? + 1;
+        self.song.nbchans = self.trks.objects.iter().map(|x| x.preamble.chanid).max().ok_or(DSEError::Invalid("SMDL file contains zero tracks! Unable to automatically determine number of channels used!!".to_string()))? + 1;
         for trk in self.trks.objects.iter_mut() {
             trk.header.chunklen = trk.preamble.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32 + trk.events.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
         }
@@ -700,14 +699,14 @@ impl SMDL {
     }
 }
 impl ReadWrite for SMDL {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = self.header.write_to_file(writer)?;
         bytes_written += self.song.write_to_file(writer)?;
         bytes_written += self.trks.write_to_file(writer)?;
         bytes_written += self.eoc.write_to_file(writer)?;
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.song.read_from_file(reader)?;
         self.trks.set_read_params(self.song.nbtrks as usize);

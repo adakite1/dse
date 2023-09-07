@@ -31,14 +31,14 @@ pub struct DSEString<const U: u8> {
     inner: [u8; 16]
 }
 impl<const U: u8> TryFrom<String> for DSEString<U> {
-    type Error = GenericError;
+    type Error = DSEError;
 
     fn try_from(value: String) -> Result<DSEString<U>, Self::Error> {
         if !value.is_ascii() {
-            return Err(GenericError::new("Cannot create `DSEString` from the provided values! String contains non-ASCII characters!"));
+            return Err(DSEError::DSEStringConversionNonASCII(value));
         }
         if value.as_bytes().len() > 15 {
-            return Err(GenericError::new("Cannot create `DSEString` from the provided values! String contains more than 15 characters!"));
+            return Err(DSEError::DSEStringConversionLengthError(value.clone(), value.as_bytes().len()));
         }
         let mut buf: [u8; 16] = [U; 16];
         for (i, &c) in value.as_bytes().iter().chain(std::iter::once(&0x00)).enumerate() {
@@ -274,6 +274,25 @@ impl Default for ADSRVolumeEnvelope {
         }
     }
 }
+impl ADSRVolumeEnvelope {
+    /// Returns an alternative "default value" of `ADSRVolumeEnvelope` based on observations of common values inside the game's swdl soundtrack.
+    pub fn default2() -> Self {
+        let mut default = Self::default();
+
+        // These params are the default for all samples in the WAVI section as seen from the bgm0001.swd and bgm.swd files. 
+        default.envon = true;
+        default.envmult = 1;
+        default.atkvol = 0;
+        default.attack = 0;
+        default.decay = 0;
+        default.sustain = 127;
+        default.hold = 0;
+        default.decay2 = 127;
+        default.release = 40;
+        
+        default
+    }
+}
 impl AutoReadWrite for ADSRVolumeEnvelope {  }
 
 #[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
@@ -387,8 +406,8 @@ impl IsSelfIndexed for SampleInfo {
     fn is_self_indexed(&self) -> Option<usize> {
         Some(self.id as usize)
     }
-    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.id = new_index.try_into()?;
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), DSEError> {
+        self.id = new_index.try_into().map_err(|_| DSEError::Placeholder())?;
         Ok(())
     }
 }
@@ -474,14 +493,14 @@ impl IsSelfIndexed for ProgramInfoHeader {
     fn is_self_indexed(&self) -> Option<usize> {
         Some(self.id as usize)
     }
-    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.id = new_index.try_into()?;
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), DSEError> {
+        self.id = new_index.try_into().map_err(|_| DSEError::Placeholder())?;
         Ok(())
     }
 }
 impl AutoReadWrite for ProgramInfoHeader {  }
 
-#[derive(Debug, Clone, Default, Reflect, Serialize, Deserialize)]
+#[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct LFOEntry {
     #[serde(default)]
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
@@ -513,12 +532,28 @@ pub struct LFOEntry {
     #[serde(rename = "@unk33_lowpassfreq")]
     pub unk33: u16, // Unknown, usually 0x0000. Possibly an extra parameter? Or a cutoff/lowpass filter's frequency cutoff?
 }
+impl Default for LFOEntry {
+    fn default() -> Self {
+        LFOEntry {
+            unk34: 0,
+            unk52: 0,
+            dest: 0,
+            wshape: 1,
+            rate: 0,
+            unk29: 0,
+            depth: 0,
+            delay: 0,
+            unk32: 0,
+            unk33: 0
+        }
+    }
+}
 impl IsSelfIndexed for LFOEntry {
     fn is_self_indexed(&self) -> Option<usize> {
         None
     }
-    fn change_self_index(&mut self, _: usize) -> Result<(), Box<dyn std::error::Error>> {
-        Err(Box::new(GenericError::new("LFO entries do not have indices!!")))
+    fn change_self_index(&mut self, _: usize) -> Result<(), DSEError> {
+        Err(DSEError::Invalid("LFO entries do not have indices!!".to_string()))
     }
 }
 impl AutoReadWrite for LFOEntry {  }
@@ -645,8 +680,8 @@ impl IsSelfIndexed for SplitEntry {
     fn is_self_indexed(&self) -> Option<usize> {
         Some(self.id as usize)
     }
-    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.id = new_index.try_into()?;
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), DSEError> {
+        self.id = new_index.try_into().map_err(|_| DSEError::Placeholder())?;
         Ok(())
     }
 }
@@ -675,7 +710,7 @@ impl IsSelfIndexed for ProgramInfo {
     fn is_self_indexed(&self) -> Option<usize> {
         self.header.is_self_indexed()
     }
-    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), DSEError> {
         self.header.change_self_index(new_index)
     }
 }
@@ -690,7 +725,7 @@ impl Default for ProgramInfo {
     }
 }
 impl ReadWrite for ProgramInfo {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = self.header.write_to_file(writer)?;
         bytes_written += self.lfo_table.write_to_file(writer)?;
         // bytes_written += self._delimiter.write_to_file(writer)?;
@@ -698,7 +733,7 @@ impl ReadWrite for ProgramInfo {
         bytes_written += self.splits_table.write_to_file(writer)?;
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.lfo_table.set_read_params(self.header.nblfos as usize);
         self.lfo_table.read_from_file(reader)?;
@@ -732,8 +767,8 @@ impl IsSelfIndexed for Keygroup {
     fn is_self_indexed(&self) -> Option<usize> {
         Some(self.id as usize)
     }
-    fn change_self_index(&mut self, new_index: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.id = new_index.try_into()?;
+    fn change_self_index(&mut self, new_index: usize) -> Result<(), DSEError> {
+        self.id = new_index.try_into().map_err(|_| DSEError::Placeholder())?;
         Ok(())
     }
 }
@@ -762,10 +797,10 @@ impl WAVIChunk {
     }
 }
 impl ReadWrite for WAVIChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.data.set_read_params(self._read_n, self.header.chunklen);
         self.data.read_from_file(reader)?;
@@ -796,10 +831,10 @@ impl PRGIChunk {
     }
 }
 impl ReadWrite for PRGIChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.data.set_read_params(self._read_n, self.header.chunklen);
         self.data.read_from_file(reader)?;
@@ -832,11 +867,11 @@ impl Default for KGRPChunk {
     }
 }
 impl ReadWrite for KGRPChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)? + if self.data.objects.len() % 2 == 1 { vec![0x67, 0xC0, 0x40, 0x00, 0x88, 0x00, 0xFF, 0x04].write_to_file(writer)? } else { 0 })
         // Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)? + if let Some(pad) = &self._padding { pad.write_to_file(writer)? } else { 0 })
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.data.set_read_params(self.header.chunklen as usize / 8);
         self.data.read_from_file(reader)?;
@@ -890,7 +925,7 @@ impl Default for PCMDChunk {
     }
 }
 impl ReadWrite for PCMDChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let len = self.header.write_to_file(writer)? + self.data.write_to_file(writer)?;
         let len_aligned = ((len - 1) | 15) + 1; // Round the length of the pcmd chunk in bytes to the next multiple of 16
         let padding_zero = len_aligned - len;
@@ -899,7 +934,7 @@ impl ReadWrite for PCMDChunk {
         }
         Ok(len_aligned)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.data = vec![0; self.header.chunklen as usize];
         self.data.read_from_file(reader)?;
@@ -932,9 +967,10 @@ impl SWDL {
         eod
     }
     /// Regenerate length, slots, and nb parameters. To keep this working, `write_to_file` should never attempt to read or seek beyond alotted frame, which is initial cursor position and beyond.
-    pub fn regenerate_read_markers(&mut self) -> Result<(), Box<dyn std::error::Error>> { //TODO: make more efficient
+    pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
         self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        println!("flen {}", self.header.flen);
         if self.header.pcmdlen & 0xFFFF0000 == 0xAAAA0000 && self.pcmd.is_none() {
             // Expected case of separation with main bank. Noop
         } else if let Some(pcmd) = &mut self.pcmd {
@@ -974,7 +1010,7 @@ impl SWDL {
         Ok(())
     }
     /// Regenerate automatic parameters.
-    pub fn regenerate_automatic_parameters(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn regenerate_automatic_parameters(&mut self) -> Result<(), DSEError> {
         // ======== SAMPLEINFO ========
         for sample_info in self.wavi.data.objects.iter_mut() {
             sample_info.ktps = 60 - sample_info.rootkey; // Note: what does DSE need ktps for though?
@@ -1012,7 +1048,7 @@ impl Default for SWDL {
     }
 }
 impl ReadWrite for SWDL {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, Box<dyn std::error::Error>> {
+    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = self.header.write_to_file(writer)?;
         bytes_written += self.wavi.write_to_file(writer)?;
         bytes_written += if let Some(prgi) = &self.prgi { prgi.write_to_file(writer)? } else { 0 };
@@ -1021,7 +1057,7 @@ impl ReadWrite for SWDL {
         bytes_written += SWDL::generate_eod_chunk_header().write_to_file(writer)?;
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), Box<dyn std::error::Error>> {
+    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         // WAVI
         self.wavi.set_read_params(self.header.nbwavislots as usize);

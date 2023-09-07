@@ -1,10 +1,11 @@
 use std::{path::{Path, PathBuf}, fs::{File, OpenOptions}, io::Seek};
 
 use chrono::{DateTime, Local, Datelike, Timelike};
+use dse::dtype::DSEError;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub fn get_file_last_modified_date_with_default<P: AsRef<Path>>(input_file_path: P) -> Result<(u16, u8, u8, u8, u8, u8, u8), Box<dyn std::error::Error>> {
+pub fn get_file_last_modified_date_with_default<P: AsRef<Path>>(input_file_path: P) -> Result<(u16, u8, u8, u8, u8, u8, u8), DSEError> {
     if let Ok(time) = std::fs::metadata(&input_file_path)?.modified() {
         let dt: DateTime<Local> = time.into();
         Ok((
@@ -29,15 +30,15 @@ pub fn get_file_last_modified_date_with_default<P: AsRef<Path>>(input_file_path:
     }
 }
 
-pub fn open_file_overwrite_rw<P: AsRef<Path>>(path: P) -> Result<File, Box<dyn std::error::Error>> {
+pub fn open_file_overwrite_rw<P: AsRef<Path>>(path: P) -> Result<File, DSEError> {
     let mut file = OpenOptions::new().append(false).create(true).read(true).write(true).open(path)?;
     file.set_len(0)?;
     file.seek(std::io::SeekFrom::Start(0))?;
     Ok(file)
 }
 
-pub fn get_input_output_pairs(input_glob: &str, source_file_format: &str, output_folder: &PathBuf, change_ext: &str) -> Vec<(PathBuf, PathBuf)> {
-    glob::glob(input_glob).expect("Failed to read glob pattern").into_iter().filter_map(|entry| {
+pub fn get_input_output_pairs(input_glob: &str, source_file_format: &str, output_folder: &PathBuf, change_ext: &str) -> Result<Vec<(PathBuf, PathBuf)>, DSEError> {
+    Ok(glob::glob(input_glob)?.into_iter().filter_map(|entry| {
         match entry {
             Ok(path) => {
                 if !valid_file_of_type(&path, source_file_format) {
@@ -59,16 +60,16 @@ pub fn get_input_output_pairs(input_glob: &str, source_file_format: &str, output
                 None
             }
         }
-    }).collect()
+    }).collect())
 }
 
-pub fn get_final_output_folder(_output_folder: &Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub fn get_final_output_folder(_output_folder: &Option<PathBuf>) -> Result<PathBuf, DSEError> {
     let output_folder;
     if let Some(custom_output_folder) = _output_folder {
         if std::fs::metadata(&custom_output_folder)?.is_dir() {
             output_folder = custom_output_folder.clone();
         } else {
-            return Err("Output path must be a folder!".into());
+            return Err(DSEError::Invalid("Output path must be a folder!".to_string()));
         }
     } else {
         output_folder = std::env::current_dir()?;

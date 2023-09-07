@@ -372,6 +372,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "soundfont",
+ "thiserror",
 ]
 
 [[package]]
