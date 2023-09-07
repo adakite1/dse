@@ -198,11 +198,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sample_info.volume = 127; // SF2 does not have a volume parameter per sample
                     sample_info.pan = 64; // SF2 does not have a pan parameter per sample, and any panning work related to stereo samples are relegated to the Instruments layer anyways
                     sample_info.smplfmt = 0x0200; // SF2 supports 16-bit PCM and 24-bit PCM, and while DSE also supports 16-bit PCM, the problem comes with file size. 16-bit PCM is **massive**, and so it's very hard to fit many samples into the limited memory of the NDS, which could explain the abundant use of 4-bit ADPCM in the original game songs. With that in mind, here we will internally encode the sample data as ADPCM, and on top of that, lower the sample rate if necessary to compress the sample data as much as we possibly can.
-                    sample_info.smplloop = !(sample_header.loop_start == 0 && sample_header.loop_end == 0); // SF2 does not seem to have a direct parameter for not looping. This seems to be it.
+                    sample_info.smplloop = sample_header.loop_start != sample_header.loop_end; // SF2 does not seem to have a direct parameter for not looping. This seems to be it.
                     // smplrate is up above with ctune and ftune
                     // smplpos is at the bottom
                     sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
-                    sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
+                    if sample_info.smplloop {
+                        sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
+                    } else {
+                        // Not looping, so loop_end - loop_start is zero. Use end - loop_start instead
+                        sample_info.looplen = (sample_header.end - sample_header.loop_start) / 2;
+                    }
                     // Write sample into main bank
                     if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
                         let sample_pos_bytes = chunk.offset() + 8 + sample_header.start as u64 * 2;
@@ -309,7 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // ID
                     program_info.header.id = preset.header.bank * 128 + preset.header.preset;
-                    program_info.header.prgvol = 60;
+                    program_info.header.prgvol = 127;
                     program_info.header.prgpan = 64;
                     program_info.header.PadByte = 170;
 
@@ -386,23 +391,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     /// Function to apply data from a zone to a split
-                    fn apply_zone_data_to_split(split_entry: &mut SplitEntry, zone: &Zone, other_zone: &Zone, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) {
+                    /// 
+                    /// Returns `true` if the zone provided is a global zone
+                    fn apply_zone_data_to_split(split_entry: &mut SplitEntry, zone: &Zone, is_first_zone: bool, other_zones: &[&Zone], sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> bool {
+                        let mut possibly_a_global_zone = true;
                         // Loop through all the generators in this zone
                         let (mut attack, mut hold, mut decay, mut release) = (
-                            other_zone.gen_list
-                                .iter()
+                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
                                 .find(|g| g.ty == soundfont::data::GeneratorType::AttackVolEnv)
                                 .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                            other_zone.gen_list
-                                .iter()
+                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
                                 .find(|g| g.ty == soundfont::data::GeneratorType::HoldVolEnv)
                                 .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                            other_zone.gen_list
-                                .iter()
+                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
                                 .find(|g| g.ty == soundfont::data::GeneratorType::DecayVolEnv)
                                 .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                            other_zone.gen_list
-                                .iter()
+                            other_zones.iter().map(|x| x.gen_list.iter()).flatten()
                                 .find(|g| g.ty == soundfont::data::GeneratorType::ReleaseVolEnv)
                                 .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
                         );
@@ -456,14 +460,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 },
                                 soundfont::data::GeneratorType::SustainVolEnv => {
                                     let decibels = -gen.amount.as_i16().unwrap() as f64 / 10.0_f64;
-                                    split_entry.volume_envelope.atkvol = (gain(decibels) * 127.0).round() as i8;
+                                    split_entry.volume_envelope.sustain = (gain(decibels) * 127.0).round() as i8;
                                 },
                                 soundfont::data::GeneratorType::ReleaseVolEnv => {
                                     release = *gen.amount.as_i16().unwrap();
                                 },
                                 soundfont::data::GeneratorType::KeynumToVolEnvHold => {  },
                                 soundfont::data::GeneratorType::KeynumToVolEnvDecay => {  },
-                                soundfont::data::GeneratorType::Instrument => {  },
+                                soundfont::data::GeneratorType::Instrument => {
+                                    possibly_a_global_zone = false;
+                                },
                                 soundfont::data::GeneratorType::Reserved1 => {  },
                                 soundfont::data::GeneratorType::KeyRange => {
                                     let key_range_value = gen.amount.as_range().unwrap();
@@ -491,7 +497,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let smpl;
                                         if let Some(&sample_i) = zone.sample() {
                                             smpl = &sample_infos[sample_i as usize];
-                                        } else if let Some(&sample_i) = other_zone.sample() {
+                                        } else if let Some(&sample_i) = other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten() {
                                             smpl = &sample_infos[sample_i as usize];
                                         } else {
                                             println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
@@ -505,7 +511,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let smpl;
                                     if let Some(&sample_i) = zone.sample() {
                                         smpl = &sample_infos[sample_i as usize];
-                                    } else if let Some(&sample_i) = other_zone.sample() {
+                                    } else if let Some(&sample_i) = other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten() {
                                         smpl = &sample_infos[sample_i as usize];
                                     } else {
                                         println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
@@ -525,6 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     split_entry.ftune = ftune;
                                 },
                                 soundfont::data::GeneratorType::SampleID => {
+                                    possibly_a_global_zone = false;
                                     // Check if the zone specifies which sample we have to use!
                                     split_entry.SmplID = first_available_id as u16 + gen.amount.as_u16().unwrap();
                                 },
@@ -555,43 +562,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             split_entry.volume_envelope.decay = lookup_env_time_value_i16(timecents_to_milliseconds(decay) as i16);
                             split_entry.volume_envelope.release = lookup_env_time_value_i16(timecents_to_milliseconds(release) as i16);
                         }
+                        
+                        possibly_a_global_zone && is_first_zone
                     }
 
                     /// Function to create splits from zones
-                    fn create_splits_from_zones(preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> Vec<SplitEntry> {
+                    fn create_splits_from_zones(global_preset_zone: Option<&Zone>, preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize) -> Vec<SplitEntry> {
                         let mut splits = Vec::with_capacity(instrument_zones.len());
-                        for instrument_zone in instrument_zones {
+                        let mut global_instrument_zone: Option<&Zone> = None;
+                        for (i, instrument_zone) in instrument_zones.iter().enumerate() {
                             let mut split = SplitEntry::default();
                             split.lowkey = 0;
                             split.hikey = 127;
                             split.lovel = 0;
                             split.hivel = 127;
-                            let smpl;
                             if let Some(&sample_i) = instrument_zone.sample() {
-                                smpl = &sample_infos[sample_i as usize];
-                            } else {
+                                let smpl_ref = &sample_infos[sample_i as usize];
+                                split.ctune = smpl_ref.ctune;
+                                split.ftune = smpl_ref.ftune;
+                                split.rootkey = smpl_ref.rootkey;
+                                split.volume_envelope = smpl_ref.volume_envelope.clone();
+                            } else if i != 0 {
                                 println!("{}Some instrument zones contain no samples!", "Warning: ".yellow());
                                 continue;
+                            } else {
+                                split.ctune = 0;
+                                split.ftune = 0;
+                                split.rootkey = 60;
+                                split.volume_envelope = ADSRVolumeEnvelope::default();
+                                println!("{}", "Global instrument zone detected!".green());
                             }
-                            split.ctune = smpl.ctune;
-                            split.ftune = smpl.ftune;
-                            split.rootkey = smpl.rootkey;
                             split.smplvol = 127;
                             split.smplpan = 64;
                             split.kgrpid = 0;
-                            split.volume_envelope = smpl.volume_envelope.clone();
-                            apply_zone_data_to_split(&mut split, preset_zone, instrument_zone, sample_infos, first_available_id, sample_rate_adjustment_curve);
-                            apply_zone_data_to_split(&mut split, instrument_zone, preset_zone, sample_infos, first_available_id, sample_rate_adjustment_curve);
+                            if let Some(global_preset_zone) = global_preset_zone {
+                                apply_zone_data_to_split(&mut split, global_preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
+                            }
+                            apply_zone_data_to_split(&mut split, preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
+                            if let Some(global_instrument_zone) = global_instrument_zone {
+                                apply_zone_data_to_split(&mut split, global_instrument_zone, false, &[preset_zone], sample_infos, first_available_id, sample_rate_adjustment_curve);
+                            }
+                            if apply_zone_data_to_split(&mut split, instrument_zone, i == 0, &(|| {
+                                let mut other_zones = Vec::new();
+                                if let Some(global_instrument_zone) = global_instrument_zone {
+                                    other_zones.push(global_instrument_zone);
+                                }
+                                other_zones.push(preset_zone);
+                                if let Some(global_preset_zone) = global_preset_zone {
+                                    other_zones.push(global_preset_zone);
+                                }
+                                other_zones
+                            })(), sample_infos, first_available_id, sample_rate_adjustment_curve) {
+                                global_instrument_zone = Some(instrument_zone);
+                            }
                             splits.push(split);
                         }
                         splits
                     }
 
                     // Create splits
-                    let splits: Vec<SplitEntry> = preset.zones.iter().map(|preset_zone| {
+                    let mut global_preset_zone: Option<&Zone> = None;
+                    let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
                         if let Some(&instrument_i) = preset_zone.instrument() {
                             let instrument = &sf2.instruments[instrument_i as usize];
-                            create_splits_from_zones(preset_zone, &instrument.zones, &track_swdl.wavi.data.objects, first_available_id, *sample_rate_adjustment_curve)
+                            create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, &track_swdl.wavi.data.objects, first_available_id, *sample_rate_adjustment_curve)
+                        } else if i == 0 {
+                            global_preset_zone = Some(preset_zone);
+                            println!("{}", "Global preset zone detected!".green());
+                            Vec::new()
                         } else {
                             println!("{}Some preset zones contain no instruments!", "Warning: ".yellow());
                             Vec::new()
