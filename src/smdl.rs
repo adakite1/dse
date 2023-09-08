@@ -679,6 +679,20 @@ pub struct SMDL {
     #[serde(skip_serializing_if = "serde_use_common_values_for_unknowns")]
     pub eoc: EOCChunk
 }
+impl DSELinkBytes for SMDL {
+    fn get_link_bytes(&self) -> (u8, u8) {
+        (self.header.unk1, self.header.unk2)
+    }
+    fn set_link_bytes(&mut self, link_bytes: (u8, u8)) {
+        (self.header.unk1, self.header.unk2) = link_bytes;
+    }
+    fn set_unk1(&mut self, unk1: u8) {
+        self.header.unk1 = unk1;
+    }
+    fn set_unk2(&mut self, unk2: u8) {
+        self.header.unk2 = unk2;
+    }
+}
 impl SMDL {
     pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========

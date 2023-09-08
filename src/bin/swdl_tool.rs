@@ -90,6 +90,10 @@ enum Commands {
         /// Adjusts the pitch of all samples (in cents)
         #[arg(short = 'P', long, default_value_t = 0, allow_hyphen_values = true)]
         pitch_adjust: i64,
+
+        /// The list of MIDI files to use for the built-in MIDI specific optimizations. An empty list (the default) skips these optimizations.
+        #[arg(short = 'm', long)]
+        midi_specific_optimization: Vec<PathBuf>
     }
 }
 
@@ -130,7 +134,7 @@ fn main() -> Result<(), DSEError> {
 
             println!("\nAll files successfully processed.");
         }
-        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead, pitch_adjust } => {
+        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead, pitch_adjust, midi_specific_optimization } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
@@ -609,7 +613,7 @@ fn main() -> Result<(), DSEError> {
                     prgi_pointer_table
                 }
 
-                fn create_track_swdl(last_modified: (u16, u8, u8, u8, u8, u8, u8), fname: String) -> Result<SWDL, DSEError> {
+                fn create_track_swdl(last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<SWDL, DSEError> {
                     let mut track_swdl = SWDL::default();
                     let (year, month, day, hour, minute, second, centisecond) = last_modified;
                     track_swdl.header.version = 0x415;
@@ -621,6 +625,10 @@ fn main() -> Result<(), DSEError> {
                     track_swdl.header.second = second;
                     track_swdl.header.centisecond = centisecond;
 
+                    if !fname.is_ascii() {
+                        return Err(DSEError::DSEFileNameConversionNonASCII("SF2".to_string(), fname));
+                    }
+                    fname.truncate(15);
                     track_swdl.header.fname = DSEString::<0xAA>::try_from(fname)?;
 
                     Ok(track_swdl)
@@ -629,13 +637,9 @@ fn main() -> Result<(), DSEError> {
                 let (first_id, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, *pitch_adjust, |(i, sample_header)| true)?;
 
                 // Create a blank track SWDL file
-                let mut fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
+                let fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
                     .to_str().ok_or(DSEError::DSEFileNameConversionNonUTF8("SF2".to_string(), input_file_path.display().to_string()))?
                     .to_string();
-                if !fname.is_ascii() {
-                    return Err(DSEError::DSEFileNameConversionNonASCII("SF2".to_string(), fname));
-                }
-                fname.truncate(15);
 
                 let mut track_swdl = create_track_swdl(get_file_last_modified_date_with_default(&input_file_path)?, fname)?;
                 let prgi_pointer_table = copy_presets(&sf2, &mut sample_infos, first_id, *sample_rate_adjustment_curve, *pitch_adjust);

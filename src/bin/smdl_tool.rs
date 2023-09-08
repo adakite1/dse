@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 /// Example: .\smdl_tool.exe to-xml .\NDS_UNPACK\data\SOUND\BGM\*.smd -o unpack
 /// Example: .\smdl_tool.exe from-xml .\unpack\*.smd.xml -o .\NDS_UNPACK\data\SOUND\BGM\
@@ -7,14 +8,13 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use byteorder::{WriteBytesExt, LittleEndian};
-use chrono::{DateTime, Local, Datelike, Timelike};
 use clap::{Parser, command, Subcommand};
 use colored::Colorize;
 use dse::smdl::{TrkChunk, DSEEvent};
 use dse::smdl::events::{Other, PlayNote, FixedDurationPause};
 use dse::swdl::{DSEString, ProgramInfo};
 use dse::{smdl::SMDL, swdl::SWDL};
-use dse::dtype::{ReadWrite, DSEError};
+use dse::dtype::{ReadWrite, DSEError, DSELinkBytes};
 
 #[path = "../binutils.rs"]
 mod binutils;
@@ -56,15 +56,23 @@ enum Commands {
         #[arg(value_name = "INPUT")]
         input_glob: String,
 
+        /// Sets the first link byte for linking to the correct SWDL bank. Will take precedence over the option `swdl`, which also sets the link bytes.
+        #[arg(short = '1', long, value_name = "LINK_BYTE_1")]
+        unk1: Option<u8>,
+
+        /// Sets the second link byte for linking to the correct SWDL bank. Will take precedence over the option `swdl`, which also sets the link bytes.
+        #[arg(short = '2', long, value_name = "LINK_BYTE_2")]
+        unk2: Option<u8>,
+
         /// Sets the SWDL file or SWD.XML to pair the MIDI files with
-        #[arg(value_name = "SWDL")]
-        swdl: PathBuf,
+        #[arg(short = 'b', long, value_name = "SWDL")]
+        swdl: Option<PathBuf>,
 
         /// Sets the folder to output the encoded files
         #[arg(short = 'o', long, value_name = "OUTPUT")]
         output_folder: Option<PathBuf>,
 
-        /// Map Program Change and CC0 Bank Select events to DSE SWDL program id's
+        /// Map Program Change and CC0 Bank Select events to DSE SWDL program id's. Without this option, by default all tracks are mapped to the 0th preset.
         #[arg(short = 'M', long, action)]
         midi_prgch: bool,
 
@@ -114,125 +122,154 @@ fn main() -> Result<(), DSEError> {
 
             println!("\nAll files successfully processed.");
         },
-        Commands::FromMIDI { input_glob, swdl: swdl_path, output_folder, midi_prgch, generate_optimized_swdl, output_xml } => {
+        Commands::FromMIDI { input_glob, unk1, unk2, swdl: swdl_path, output_folder, midi_prgch, generate_optimized_swdl, output_xml } => {
             let (source_file_format, change_ext) = ("mid", "smd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
             let input_file_paths_2: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, "swd")?;
 
-            let mut swdl;
-            if valid_file_of_type(swdl_path, "swd") {
-                swdl = SWDL::default();
-                swdl.read_from_file(&mut File::open(swdl_path)?)?;
-            } else if valid_file_of_type(swdl_path, "xml") {
-                let st = std::fs::read_to_string(swdl_path)?;
-                swdl = quick_xml::de::from_str::<SWDL>(&st)?;
-                swdl.regenerate_read_markers()?;
-                swdl.regenerate_automatic_parameters()?;
-            } else {
-                return Err(DSEError::Invalid("Provided SWD file is not an SWD file!".to_string()));
+            let mut swdl = None;
+            if let Some(swdl_path) = swdl_path {
+                if valid_file_of_type(swdl_path, "swd") {
+                    swdl = Some(SWDL::default());
+                    swdl.as_mut().unwrap().read_from_file(&mut File::open(swdl_path)?)?;
+                } else if valid_file_of_type(swdl_path, "xml") {
+                    let st = std::fs::read_to_string(swdl_path)?;
+                    swdl = Some(quick_xml::de::from_str::<SWDL>(&st)?);
+                    swdl.as_mut().unwrap().regenerate_read_markers()?;
+                    swdl.as_mut().unwrap().regenerate_automatic_parameters()?;
+                } else {
+                    return Err(DSEError::Invalid("Provided SWD file is not an SWD file!".to_string()));
+                }
             }
 
             for ((input_file_path, output_file_path), (_, output_file_path_swd)) in input_file_paths.into_iter().zip(input_file_paths_2) {
                 print!("Converting {}... ", input_file_path.display());
 
                 // Open input MIDI file
-                let (year, month, day, hour, minute, second, centisecond) = get_file_last_modified_date_with_default(&input_file_path)?;
-                let smf_source = std::fs::read(&input_file_path)?;
-                let smf = Smf::parse(&smf_source).map_err(|x| DSEError::SmfParseError(x.to_string()))?;
-                let tpb = match smf.header.timing {
-                    midly::Timing::Metrical(tpb) => tpb.as_int(),
-                    _ => {
-                        return Err(DSEError::DSESmfUnsupportedTimingSpecifier());
+                fn open_midi<'a>(smf_source: &'a Vec<u8>) -> Result<Smf<'a>, DSEError> {
+                    Smf::parse(&smf_source).map_err(|x| DSEError::SmfParseError(x.to_string()))
+                }
+                fn get_midi_tpb(smf: &Smf) -> Result<u16, DSEError> {
+                    match smf.header.timing {
+                        midly::Timing::Metrical(tpb) => Ok(tpb.as_int()),
+                        _ => Err(DSEError::DSESmfUnsupportedTimingSpecifier())
                     }
-                };
-                let mut fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
+                }
+
+                let smf_source = std::fs::read(&input_file_path)?;
+                let smf = open_midi(&smf_source)?;
+                let tpb = get_midi_tpb(&smf)?;
+
+                let fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
                     .to_str().ok_or(DSEError::DSEFileNameConversionNonUTF8("MIDI".to_string(), input_file_path.display().to_string()))?
                     .to_string();
-                if !fname.is_ascii() {
-                    return Err(DSEError::DSEFileNameConversionNonASCII("MIDI".to_string(), fname));
-                }
-                fname.truncate(15);
-                let fname = DSEString::<0xFF>::try_from(fname)?;
 
                 // Setup empty smdl object
-                let mut smdl = SMDL::default();
+                fn create_track_smdl(last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<SMDL, DSEError> {
+                    let mut smdl = SMDL::default();
+                    let (year, month, day, hour, minute, second, centisecond) = last_modified;
+
+                    smdl.header.version = 0x415;
+                    smdl.header.year = year;
+                    smdl.header.month = month;
+                    smdl.header.day = day;
+                    smdl.header.hour = hour;
+                    smdl.header.minute = minute;
+                    smdl.header.second = second;
+                    smdl.header.centisecond = centisecond;
+
+                    if !fname.is_ascii() {
+                        return Err(DSEError::DSEFileNameConversionNonASCII("MIDI".to_string(), fname));
+                    }
+                    fname.truncate(15);
+                    smdl.header.fname = DSEString::<0xFF>::try_from(fname)?;
+
+                    Ok(smdl)
+                }
+
+                let mut smdl = create_track_smdl(get_file_last_modified_date_with_default(&input_file_path)?, fname)?;
+
                 // Fill in header and song information
-                smdl.header.version = 0x415;
-                smdl.header.year = year;
-                smdl.header.month = month;
-                smdl.header.day = day;
-                smdl.header.hour = hour;
-                smdl.header.minute = minute;
-                smdl.header.second = second;
-                smdl.header.centisecond = centisecond;
-                smdl.header.fname = fname;
-
-                smdl.header.unk1 = swdl.header.unk1;
-                smdl.header.unk2 = swdl.header.unk2;
-
+                if let Some(swdl) = &swdl {
+                    smdl.set_link_bytes(swdl.get_link_bytes());
+                }
+                if let Some(unk1) = unk1 {
+                    smdl.set_unk1(*unk1);
+                }
+                if let Some(unk2) = unk2 {
+                    smdl.set_unk2(*unk2);
+                }
                 smdl.song.tpqn = tpb;
 
                 // Fill in tracks
-                let midi_messages_combined: Vec<TrackEvent>;
-                let midi_messages = match smf.header.format {
-                    midly::Format::SingleTrack => { &smf.tracks[0] },
-                    midly::Format::Parallel => {
-                        println!("{}SMF1-type MIDI file detected! All MIDI tracks contained within will be mapped to MIDI channels and converted to SMF0!", "Warning: ".yellow());
-                        println!("{}This converter assumes that the first MIDI track encountered is dedicated solely for Meta events to follow convention.", "Warning: ".yellow());
-                        let mut first_track_is_meta: bool = true;
-                        for midi_msg in &smf.tracks[0] {
-                            match midi_msg.kind {
-                                midly::TrackEventKind::Midi { channel: _, message: _ } => {
-                                    // Track does not follow convention!
-                                    println!("{}SMF1 multi-track MIDI file contains note events in the first track! The first track is usually reserved only for meta events. It will be assumed that this MIDI file does not follow that convention.", "Warning: ".yellow());
-                                    first_track_is_meta = false;
-                                    break;
-                                },
-                                _ => {  }
-                            }
-                        }
-                        let mut midi_messages_tmp: Vec<(u128, TrackEvent)> = Vec::new();
-                        for (i, track) in smf.tracks.iter().enumerate() {
-                            let mut global_tick = 0;
-                            for midi_msg in track {
-                                global_tick += midi_msg.delta.as_int() as u128;
-                                // Overwrite MIDI message channel data to match track number!
-                                let mut midi_msg_edited = midi_msg.clone();
-                                if let midly::TrackEventKind::Midi { channel, message: _ } = &mut midi_msg_edited.kind {
-                                    let mapped_channel = if first_track_is_meta { i - 1 } else { i };
-                                    *channel = u4::try_from(u8::try_from(mapped_channel).map_err(|_| DSEError::DSESmf0TooManyTracks())?).ok_or(DSEError::DSESmf0TooManyTracks())?;
+                fn get_midi_messages_flattened<'a>(smf: &'a Smf) -> Result<Cow<'a, [TrackEvent<'a>]>, DSEError> {
+                    let midi_messages_combined: Vec<TrackEvent>;
+                    match smf.header.format {
+                        midly::Format::SingleTrack => { Ok(Cow::from(&smf.tracks[0])) },
+                        midly::Format::Parallel => {
+                            println!("{}SMF1-type MIDI file detected! All MIDI tracks contained within will be mapped to MIDI channels and converted to SMF0!", "Warning: ".yellow());
+                            println!("{}This converter assumes that the first MIDI track encountered is dedicated solely for Meta events to follow convention.", "Warning: ".yellow());
+                            let mut first_track_is_meta: bool = true;
+                            for midi_msg in &smf.tracks[0] {
+                                match midi_msg.kind {
+                                    midly::TrackEventKind::Midi { channel: _, message: _ } => {
+                                        // Track does not follow convention!
+                                        println!("{}SMF1 multi-track MIDI file contains note events in the first track! The first track is usually reserved only for meta events. It will be assumed that this MIDI file does not follow that convention.", "Warning: ".yellow());
+                                        first_track_is_meta = false;
+                                        break;
+                                    },
+                                    _ => {  }
                                 }
-                                // Search to see where to insert the event
-                                let insert_position = midi_messages_tmp.binary_search_by_key(&global_tick, |&(k, _)| k);
-                                midi_messages_tmp.insert(match insert_position {
-                                    Ok(index) => index,
-                                    Err(index) => index
-                                }, (global_tick, midi_msg_edited));
                             }
-                        }
-                        for i in 0..midi_messages_tmp.len() {
-                            let mut new_delta = 0;
-                            if i != 0 {
-                                let (previous_global_tick, _) = &midi_messages_tmp[i - 1];
-                                let (current_global_tick, _) = &midi_messages_tmp[i];
-                                new_delta = current_global_tick - previous_global_tick;
+                            let mut midi_messages_tmp: Vec<(u128, TrackEvent)> = Vec::new();
+                            for (i, track) in smf.tracks.iter().enumerate() {
+                                let mut global_tick = 0;
+                                for midi_msg in track {
+                                    global_tick += midi_msg.delta.as_int() as u128;
+                                    // Overwrite MIDI message channel data to match track number!
+                                    let mut midi_msg_edited = midi_msg.clone();
+                                    if let midly::TrackEventKind::Midi { channel, message: _ } = &mut midi_msg_edited.kind {
+                                        let mapped_channel = if first_track_is_meta { i - 1 } else { i };
+                                        *channel = u4::try_from(u8::try_from(mapped_channel).map_err(|_| DSEError::DSESmf0TooManyTracks())?).ok_or(DSEError::DSESmf0TooManyTracks())?;
+                                    }
+                                    // Search to see where to insert the event
+                                    let insert_position = midi_messages_tmp.binary_search_by_key(&global_tick, |&(k, _)| k);
+                                    midi_messages_tmp.insert(match insert_position {
+                                        Ok(index) => index,
+                                        Err(index) => index
+                                    }, (global_tick, midi_msg_edited));
+                                }
                             }
-                            midi_messages_tmp[i].1.delta = u28::try_from(u32::try_from(new_delta).map_err(|_| DSEError::DSESmf0MessagesTooFarApart())?).ok_or(DSEError::DSESmf0MessagesTooFarApart())?;
-                        }
-                        midi_messages_combined = midi_messages_tmp.into_iter().map(|(_, evt)| evt).collect();
-                        &midi_messages_combined
-                    },
-                    _ => {
-                        return Err(DSEError::DSESequencialSmfUnsupported());
-                    },
-                };
+                            for i in 0..midi_messages_tmp.len() {
+                                let mut new_delta = 0;
+                                if i != 0 {
+                                    let (previous_global_tick, _) = &midi_messages_tmp[i - 1];
+                                    let (current_global_tick, _) = &midi_messages_tmp[i];
+                                    new_delta = current_global_tick - previous_global_tick;
+                                }
+                                midi_messages_tmp[i].1.delta = u28::try_from(u32::try_from(new_delta).map_err(|_| DSEError::DSESmf0MessagesTooFarApart())?).ok_or(DSEError::DSESmf0MessagesTooFarApart())?;
+                            }
+                            midi_messages_combined = midi_messages_tmp.into_iter().map(|(_, evt)| evt).collect();
+                            Ok(Cow::from(midi_messages_combined))
+                        },
+                        _ => {
+                            return Err(DSEError::DSESequencialSmfUnsupported());
+                        },
+                    }
+                }
+                
+                let midi_messages = get_midi_messages_flattened(&smf)?;
+
                 // Vec of TrkChunk's
-                let prgi_objects = &swdl.prgi.as_ref().ok_or(DSEError::DSESmdConverterSwdEmpty())?.data.objects;
-                let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::new(i as u8, i as u8, swdl.header.unk1, swdl.header.unk2, prgi_objects[(i + prgi_objects.len() - 1) % prgi_objects.len()].header.id as u8).unwrap());
+                let mut prgi_objects = None;
+                if let Some(swdl) = &swdl {
+                    prgi_objects = Some(&swdl.prgi.as_ref().ok_or(DSEError::DSESmdConverterSwdEmpty())?.data.objects);
+                }
+                let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::new(i as u8, i as u8, smdl.get_link_bytes(), 0).unwrap());
                 // Loop through all the events
                 let mut global_tick = 0;
-                for midi_msg in midi_messages {
+                for midi_msg in midi_messages.as_ref() {
                     let delta = midi_msg.delta.as_int() as u128;
                     global_tick += delta;
 
@@ -327,40 +364,50 @@ fn main() -> Result<(), DSEError> {
                 }
 
                 // Get a list of swdl presets in the file provided
-                let mut prgi_ids_prune_list: Vec<u16> = prgi_objects.iter().map(|x| x.header.id).collect();
+                let mut prgi_ids_prune_list: Option<Vec<u16>> = prgi_objects.map(|prgi_objects| prgi_objects.iter().map(|x| x.header.id).collect());
 
                 // Fill the tracks into the smdl
                 smdl.trks.objects = trks.into_iter().map(|mut x| {
                     x.fix_current_global_tick(global_tick).unwrap();
                     for id in x.programs_used() {
-                        if let Some(idx) = prgi_ids_prune_list.iter().position(|&r| r == *id as u16) {
-                            prgi_ids_prune_list.remove(idx);
+                        if let Some(prgi_ids_prune_list) = prgi_ids_prune_list.as_mut() {
+                            if let Some(idx) = prgi_ids_prune_list.iter().position(|&r| r == *id as u16) {
+                                prgi_ids_prune_list.remove(idx);
+                            }
                         }
                     }
                     x.close_track()
                 }).collect();
 
                 if *generate_optimized_swdl {
-                    // Remove unnecessary presets and samples
-                    let mut track_swdl = swdl.clone();
-                    let prgi_objects = &mut track_swdl.prgi.as_mut().ok_or(DSEError::DSESmdConverterSwdEmpty())?.data.objects;
-                    for unneeded_prgi in prgi_ids_prune_list {
-                        if let Some(idx) = prgi_objects.iter().position(|prgm_info: &ProgramInfo| prgm_info.header.id == unneeded_prgi) {
-                            prgi_objects.remove(idx);
+                    if let Some(prgi_ids_prune_list) = prgi_ids_prune_list {
+                        // Since the check for `prgi_ids_prune_list` has cleared, we can assume these will all exist.
+                        let swdl = swdl.as_ref().unwrap();
+                        let _ = prgi_objects.as_ref().unwrap(); // Added for completion and documentation
+
+                        // Remove unnecessary presets and samples
+                        let mut track_swdl = swdl.clone();
+                        let prgi_objects = &mut track_swdl.prgi.as_mut().ok_or(DSEError::DSESmdConverterSwdEmpty())?.data.objects;
+                        for unneeded_prgi in prgi_ids_prune_list {
+                            if let Some(idx) = prgi_objects.iter().position(|prgm_info: &ProgramInfo| prgm_info.header.id == unneeded_prgi) {
+                                prgi_objects.remove(idx);
+                            }
                         }
-                    }
-                    let mut votes: HashMap<u16, usize> = HashMap::new();
-                    let wavi_objects = &mut track_swdl.wavi.data.objects;
-                    for prgi in prgi_objects {
-                        for split in &prgi.splits_table.objects {
-                            votes.insert(split.SmplID, 1); // Note that this will overwrite previous votes, but it shouldn't matter since as long as a single remaining preset depends on the sample, it should be kept.
+                        let mut votes: HashMap<u16, usize> = HashMap::new();
+                        let wavi_objects = &mut track_swdl.wavi.data.objects;
+                        for prgi in prgi_objects {
+                            for split in &prgi.splits_table.objects {
+                                votes.insert(split.SmplID, 1); // Note that this will overwrite previous votes, but it shouldn't matter since as long as a single remaining preset depends on the sample, it should be kept.
+                            }
                         }
+                        wavi_objects.retain(|obj| votes.contains_key(&obj.id));
+                        println!("\n{}", "Generating optimized SWDL file...".green());
+                        track_swdl.regenerate_read_markers()?;
+                        track_swdl.regenerate_automatic_parameters()?;
+                        track_swdl.write_to_file(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+                    } else {
+                        println!("{}Failed to generate an optimized track-specific SWDL bank! Source SWDL bank unspecified!! Skipped.", "Error: ".red());
                     }
-                    wavi_objects.retain(|obj| votes.contains_key(&obj.id));
-                    println!("\n{}", "Generating optimized SWDL file...".green());
-                    track_swdl.regenerate_read_markers()?;
-                    track_swdl.regenerate_automatic_parameters()?;
-                    track_swdl.write_to_file(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
                 }
 
                 // Regenerate read markers for the SMDL
@@ -389,7 +436,7 @@ pub struct TrkChunkWriter {
     last_program_change_global_tick: u128
 }
 impl TrkChunkWriter {
-    pub fn new(trkid: u8, chanid: u8, unk1: u8, unk2: u8, default_program: u8) -> Result<TrkChunkWriter, DSEError> {
+    pub fn new(trkid: u8, chanid: u8, link_bytes: (u8, u8), default_program: u8) -> Result<TrkChunkWriter, DSEError> {
         let mut trk = TrkChunk::default();
         trk.preamble.trkid = trkid;
         trk.preamble.chanid = chanid;
@@ -398,8 +445,8 @@ impl TrkChunkWriter {
         // Fill in some standard events
         trk_chunk_writer.add_other_with_params_u8("SetTrackExpression", 100)?; // Random value for now
         if !(trkid == 0 && chanid == 0) {
-            trk_chunk_writer.add_swdl(unk2)?;
-            trk_chunk_writer.add_bank(unk1)?;
+            trk_chunk_writer.add_swdl(link_bytes.1)?;
+            trk_chunk_writer.add_bank(link_bytes.0)?;
             trk_chunk_writer.add_other_with_params_u8("SetProgram", default_program)?;
             trk_chunk_writer.programs_used.push(default_program);
         }

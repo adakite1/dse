@@ -454,3 +454,12 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTa
         Ok(())
     }
 }
+
+/// Trait defining the getters and setters for the DSE link bytes
+pub trait DSELinkBytes {
+    fn get_link_bytes(&self) -> (u8, u8);
+    fn set_link_bytes(&mut self, link_bytes: (u8, u8));
+    fn set_unk1(&mut self, unk1: u8);
+    fn set_unk2(&mut self, unk2: u8);
+}
+

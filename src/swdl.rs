@@ -960,6 +960,20 @@ pub struct SWDL {
     #[serde(skip_serializing)]
     pub _eod: ChunkHeader
 }
+impl DSELinkBytes for SWDL {
+    fn get_link_bytes(&self) -> (u8, u8) {
+        (self.header.unk1, self.header.unk2)
+    }
+    fn set_link_bytes(&mut self, link_bytes: (u8, u8)) {
+        (self.header.unk1, self.header.unk2) = link_bytes;
+    }
+    fn set_unk1(&mut self, unk1: u8) {
+        self.header.unk1 = unk1;
+    }
+    fn set_unk2(&mut self, unk2: u8) {
+        self.header.unk2 = unk2;
+    }
+}
 impl SWDL {
     pub fn generate_eod_chunk_header() -> ChunkHeader {
         let mut eod = ChunkHeader::default();
