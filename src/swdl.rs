@@ -282,7 +282,7 @@ impl ADSRVolumeEnvelope {
         // These params are the default for all samples in the WAVI section as seen from the bgm0001.swd and bgm.swd files. 
         default.envon = true;
         default.envmult = 1;
-        default.atkvol = 0;
+        default.atkvol = 127; // Modified slightly to match SF2 defaults
         default.attack = 0;
         default.decay = 0;
         default.sustain = 127;
