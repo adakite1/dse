@@ -243,7 +243,7 @@ pub struct TrkChunkPreamble {
 impl AutoReadWrite for TrkChunkPreamble {  }
 
 pub mod events {
-    use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
+    use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt, BigEndian};
     use phf::phf_ordered_map;
     use serde::{Serialize, Deserialize};
 
@@ -264,22 +264,21 @@ pub mod events {
             writer.write_u8(self.velocity)?;
 
             let mut keydownduration = [0_u8; 4];
-            if self.keydownduration > 0xFFFFFF {
-                return Err(DSEError::Invalid("Keydown duration needs to be within the range 0 to 0xFFFFFF".to_string()))?;
-            }
-            (&mut keydownduration[..]).write_u32::<LittleEndian>(self.keydownduration)?;
-            let mut keydowndurationlen = 0_u8;
-            for &b in keydownduration.iter() {
-                if b != 0x00 {
-                    keydowndurationlen += 1;
-                } else {
-                    break;
+            (&mut keydownduration[..]).write_u32::<BigEndian>(self.keydownduration)?;
+
+            let keydowndurationlen = match self.keydownduration {
+                0x0 => 0,
+                0x1..=0xFF => 1,
+                0x100..=0xFFFF => 2,
+                0x10000..=0xFFFFFF => 3,
+                _ => {
+                    return Err(DSEError::Invalid("Keydown duration needs to be within the range 0 to 0xFFFFFF".to_string()))?;
                 }
-            }
+            };
 
             let note_data = (keydowndurationlen << 6) + (self.octavemod << 4) + self.note;
             writer.write_u8(note_data)?;
-            writer.write_all(&keydownduration[..keydowndurationlen as usize])?;
+            writer.write_all(&keydownduration[(4-keydowndurationlen as usize)..])?;
             Ok(2 + keydowndurationlen as usize)
         }
         fn read_from_file<R: std::io::Read + std::io::Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
@@ -292,10 +291,10 @@ pub mod events {
             // print!("{}", ['t', 'T', 'y', 'Y', 'u', 'i', 'I', 'o', 'O', 'p', 'P', 'a', ' '][self.note as usize]);
 
             let mut keydownduration = [0_u8; 4];
-            for i in 0..self._nbparambytes as usize {
+            for i in (4-self._nbparambytes as usize)..4 {
                 keydownduration[i] = reader.read_u8()?;
             }
-            self.keydownduration = (&keydownduration[..]).read_u32::<LittleEndian>()?;
+            self.keydownduration = (&keydownduration[..]).read_u32::<BigEndian>()?;
             Ok(())
         }
     }

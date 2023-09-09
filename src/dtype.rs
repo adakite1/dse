@@ -4,7 +4,7 @@ use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use serde::{Serialize, Deserialize};
 
-use crate::swdl::{ADSRVolumeEnvelope, DSEString};
+use crate::swdl::{ADSRVolumeEnvelope, DSEString, Tuning};
 
 use thiserror::Error;
 
@@ -226,6 +226,8 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                         bytes_written += dse_string.write_to_file(writer)?;
                     } else if let Some(dse_string) = field.as_any().downcast_ref::<DSEString<0xFF>>() {
                         bytes_written += dse_string.write_to_file(writer)?;
+                    } else if let Some(tuning) = field.as_any().downcast_ref::<Tuning>() {
+                        bytes_written += tuning.write_to_file(writer)?;
                     } else {
                         panic!("Unsupported auto type!");
                     }
@@ -284,6 +286,8 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                         dse_string.read_from_file(file)?;
                     } else if let Some(dse_string) = field.as_any_mut().downcast_mut::<DSEString<0xFF>>() {
                         dse_string.read_from_file(file)?;
+                    } else if let Some(tuning) = field.as_any_mut().downcast_mut::<Tuning>() {
+                        tuning.read_from_file(file)?;
                     } else {
                         panic!("Unsupported auto type!");
                     }

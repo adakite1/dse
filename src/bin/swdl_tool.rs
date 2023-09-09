@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use byteorder::{WriteBytesExt, ReadBytesExt, LittleEndian};
 use clap::{Parser, command, Subcommand};
 use colored::Colorize;
-use dse::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, DSEString, ProgramInfo, SplitEntry, LFOEntry, PRGIChunk, KGRPChunk, Keygroup, PCMDChunk};
+use dse::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, DSEString, ProgramInfo, SplitEntry, LFOEntry, PRGIChunk, KGRPChunk, Keygroup, PCMDChunk, Tuning};
 use dse::dtype::{ReadWrite, PointerTable, DSEError};
 
 #[path = "../binutils.rs"]
@@ -79,8 +79,7 @@ enum Commands {
         /// 1 - Ideal sample correction for fixed 32728.5Hz hardware output rate
         /// 2 - Discrete lookup table based on the original EoS main bank (all samples must either match the `sample_rate` parameter *or* be converted to that sample rate in this mode!)
         /// 3 - Fitted curve
-        /// 4 - Ideal sample correction minus 100 cents (1 semitone)
-        #[arg(short = 'C', long, default_value_t = 4)]
+        #[arg(short = 'C', long, default_value_t = 1)]
         sample_rate_adjustment_curve: usize,
 
         /// The lookahead for the ADPCM encoding process. A higher value allows the encoder to look further into the future to find the optimum coding sequence for the file. Default is 3, but experimentation with higher values is recommended.
@@ -222,9 +221,9 @@ fn main() -> Result<(), DSEError> {
                                 new_loop_start = 0;
                             }
                             sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
-                            let (ctune, ftune) = sample_rate_adjustment(new_sample_rate, sample_rate_adjustment_curve, pitch_adjust)?;
-                            sample_info.ftune = ftune + sample_header.pitchadj;
-                            sample_info.ctune = ctune;
+                            let mut tuning = sample_rate_adjustment(new_sample_rate, sample_rate_adjustment_curve, pitch_adjust)?;
+                            tuning.add_cents(sample_header.pitchadj as i64);
+                            sample_info.tuning = tuning;
                             sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
                             sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
     
@@ -333,8 +332,8 @@ fn main() -> Result<(), DSEError> {
                                     }
                                 }
                             }
-                            fn find_in_other_zones<'a>(other_zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
-                                other_zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
+                            fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
+                                zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
                             }
                             // https://stackoverflow.com/questions/67016985/map-numeric-range-rust
                             fn map_range(from_range: (f64, f64), to_range: (f64, f64), s: f64) -> f64 {
@@ -344,13 +343,13 @@ fn main() -> Result<(), DSEError> {
                             let mut possibly_a_global_zone = true;
                             // Loop through all the generators in this zone
                             let (mut attack, mut hold, mut decay, mut release) = (
-                                find_in_other_zones(other_zones, soundfont::data::GeneratorType::AttackVolEnv)
+                                find_in_zones(other_zones, soundfont::data::GeneratorType::AttackVolEnv)
                                     .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                                find_in_other_zones(other_zones, soundfont::data::GeneratorType::HoldVolEnv)
+                                find_in_zones(other_zones, soundfont::data::GeneratorType::HoldVolEnv)
                                     .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                                find_in_other_zones(other_zones, soundfont::data::GeneratorType::DecayVolEnv)
+                                find_in_zones(other_zones, soundfont::data::GeneratorType::DecayVolEnv)
                                     .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                                find_in_other_zones(other_zones, soundfont::data::GeneratorType::ReleaseVolEnv)
+                                find_in_zones(other_zones, soundfont::data::GeneratorType::ReleaseVolEnv)
                                     .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
                             );
                             let mut ftune_overflowed = false;
@@ -375,7 +374,7 @@ fn main() -> Result<(), DSEError> {
                                     soundfont::data::GeneratorType::ReverbEffectsSend => {  },
                                     soundfont::data::GeneratorType::Pan => {
                                         split_entry.smplpan = map_range((-500.0, 500.0), (0.0, 127.0), (
-                                            *gen.amount.as_i16().unwrap() + if additive { find_in_other_zones(other_zones, soundfont::data::GeneratorType::Pan).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }
+                                            *gen.amount.as_i16().unwrap() + if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::Pan).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }
                                         ) as f64).round() as i8;
                                     },
                                     soundfont::data::GeneratorType::Unused2 => {  },
@@ -416,7 +415,7 @@ fn main() -> Result<(), DSEError> {
                                         }
                                     },
                                     soundfont::data::GeneratorType::SustainVolEnv => {
-                                        let decibels = -(gen.amount.as_i16().unwrap() + if additive { find_in_other_zones(other_zones, soundfont::data::GeneratorType::SustainVolEnv).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                                        let decibels = -(gen.amount.as_i16().unwrap() + if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::SustainVolEnv).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
                                         split_entry.volume_envelope.sustain = (gain(decibels) * 127.0).round() as i8;
                                     },
                                     soundfont::data::GeneratorType::ReleaseVolEnv => {
@@ -450,38 +449,34 @@ fn main() -> Result<(), DSEError> {
                                     soundfont::data::GeneratorType::Keynum => {  },
                                     soundfont::data::GeneratorType::Velocity => {  },
                                     soundfont::data::GeneratorType::InitialAttenuation => {
-                                        let decibels = -(gen.amount.as_i16().unwrap() + if additive { find_in_other_zones(other_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                                        let decibels = -(gen.amount.as_i16().unwrap() + if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
                                         split_entry.volume_envelope.atkvol = (gain(decibels) * 127.0).round() as i8;
                                     },
                                     soundfont::data::GeneratorType::Reserved2 => {  },
                                     soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
                                     soundfont::data::GeneratorType::CoarseTune => {
-                                        if !ftune_overflowed {
-                                            if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                                                let smpl = &sample_infos[sample_i as usize];
-                                                let (ctune, _) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
-                                                split_entry.ctune = (*gen.amount.as_i16().unwrap() + if additive { find_in_other_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as i8 + ctune;
-                                            } else {
-                                                println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
-                                                continue;
-                                            }
+                                        if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
+                                            let smpl = &sample_infos[sample_i as usize];
+                                            let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
+                                            tuning.add_semitones(*gen.amount.as_i16().unwrap() as i64);
+                                            tuning.add_semitones(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                                            tuning.add_cents(find_in_zones(&[&zone], soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
+                                            tuning.add_cents(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                                            split_entry.tuning = tuning;
+                                        } else {
+                                            println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
+                                            continue;
                                         }
                                     },
                                     soundfont::data::GeneratorType::FineTune => {
                                         if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
                                             let smpl = &sample_infos[sample_i as usize];
-                                            let (ctune, ftune) = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
-                                            let tmp = (*gen.amount.as_i16().unwrap() + if additive { find_in_other_zones(other_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as i64 + ftune as i64;
-                                            let (ctune_delta, ftune) = cents_to_ctune_ftune(tmp);
-                                            if ctune_delta != 0 {
-                                                // Overflow!
-                                                ftune_overflowed = true;
-                                                split_entry.ctune = (zone.gen_list
-                                                    .iter()
-                                                    .find(|g| g.ty == soundfont::data::GeneratorType::CoarseTune)
-                                                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) + if additive { find_in_other_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as i8 + ctune + ctune_delta;
-                                            }
-                                            split_entry.ftune = ftune;
+                                            let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
+                                            tuning.add_semitones(find_in_zones(&[&zone], soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
+                                            tuning.add_semitones(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                                            tuning.add_cents(*gen.amount.as_i16().unwrap() as i64);
+                                            tuning.add_cents(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                                            split_entry.tuning = tuning;
                                         } else {
                                             println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
                                             continue;
@@ -542,16 +537,14 @@ fn main() -> Result<(), DSEError> {
                                 split.hivel = 127;
                                 if let Some(&sample_i) = instrument_zone.sample() {
                                     let smpl_ref = &sample_infos[sample_i as usize];
-                                    split.ctune = smpl_ref.ctune;
-                                    split.ftune = smpl_ref.ftune;
+                                    split.tuning = smpl_ref.tuning;
                                     split.rootkey = smpl_ref.rootkey;
                                     split.volume_envelope = smpl_ref.volume_envelope.clone();
                                 } else if i != 0 {
                                     println!("{}Some instrument zones contain no samples!", "Warning: ".yellow());
                                     continue;
                                 } else {
-                                    split.ctune = 0;
-                                    split.ftune = 0;
+                                    split.tuning = Tuning::new(0, 0);
                                     split.rootkey = 60;
                                     split.volume_envelope = ADSRVolumeEnvelope::default();
                                     println!("{}", "Global instrument zone detected!".green());
@@ -577,9 +570,21 @@ fn main() -> Result<(), DSEError> {
                                     is_global = true;
                                 }
                                 if let Some(global_preset_zone) = global_preset_zone {
-                                    apply_zone_data_to_split(&mut split, true, global_preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
+                                    apply_zone_data_to_split(&mut split, true, global_preset_zone, false, &(|| {
+                                        let mut other_zones = vec![instrument_zone];
+                                        if let Some(global_instrument_zone) = global_instrument_zone {
+                                            other_zones.push(global_instrument_zone);
+                                        }
+                                        other_zones
+                                    })(), sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
                                 }
-                                apply_zone_data_to_split(&mut split, true, preset_zone, false, &[instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
+                                apply_zone_data_to_split(&mut split, true, preset_zone, false, &(|| {
+                                    let mut other_zones = vec![instrument_zone];
+                                    if let Some(global_instrument_zone) = global_instrument_zone {
+                                        other_zones.push(global_instrument_zone);
+                                    }
+                                    other_zones
+                                })(), sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
                                 if !is_global { // If this split represents a global instrument zone it should not be included.
                                     splits.push(split);
                                 }
@@ -689,31 +694,12 @@ fn main() -> Result<(), DSEError> {
 pub fn sample_rate_adjustment_in_cents(sample_rate: f64) -> f64 {
     ((sample_rate - 1115.9471180474397) / 31832.602532753794).ln() / 0.0005990154279493774
 }
-pub fn cents_to_ctune_ftune(mut cents: i64) -> (i8, i8) {
-    let mut sign = 1;
-    if cents == 0 {
-        return (0, 0);
-    } else if cents < 0 {
-        sign = -1;
-    }
-    cents = cents.abs();
 
-    let mut ctune = 0;
-    let mut ftune = cents;
-    while ftune >= 100 {
-        ftune -= 100;
-        ctune += 1;
-    }
-    (sign * ctune as i8, sign * ftune as i8)
+pub fn sample_rate_adjustment_3(sample_rate: f64) -> Result<Tuning, DSEError> {
+    Ok(Tuning::from_cents(sample_rate_adjustment_in_cents(sample_rate) as i64))
 }
-pub fn sample_rate_adjustment_3(sample_rate: f64) -> Result<(i8, i8), DSEError> {
-    Ok(cents_to_ctune_ftune(sample_rate_adjustment_in_cents(sample_rate) as i64))
-}
-pub fn sample_rate_adjustment_1(sample_rate: f64) -> Result<(i8, i8), DSEError> {
-    Ok(cents_to_ctune_ftune((1200.0 * (sample_rate / 32728.5).log2()).round() as i64))
-}
-pub fn sample_rate_adjustment_4(sample_rate: f64) -> Result<(i8, i8), DSEError> {
-    Ok(cents_to_ctune_ftune((1200.0 * (sample_rate / 32728.5).log2()).round() as i64 - 100))
+pub fn sample_rate_adjustment_1(sample_rate: f64) -> Result<Tuning, DSEError> {
+    Ok(Tuning::from_cents((1200.0 * (sample_rate / 32728.5).log2()).round() as i64))
 }
 static SAMPLE_RATE_ADJUSTMENT_TABLE: phf::Map<u32, i64> = phf_map! {
     8000_u32 => -2600_i64,	11025_u32 => -1858_i64,	11031_u32 => -1856_i64,	11069_u32 => -1841_i64,	
@@ -753,25 +739,24 @@ static SAMPLE_RATE_ADJUSTMENT_TABLE: phf::Map<u32, i64> = phf_map! {
     44225_u32 => 554_i64,	44249_u32 => 557_i64,	44539_u32 => 586_i64,	45158_u32 => 391_i64,	
     45264_u32 => 401_i64,	45656_u32 => 439_i64
 };
-pub fn sample_rate_adjustment_2(sample_rate: f64) -> Result<(i8, i8), DSEError> {
+pub fn sample_rate_adjustment_2(sample_rate: f64) -> Result<Tuning, DSEError> {
     let smplrate = sample_rate.round() as u32;
     if let Some(&cents) = SAMPLE_RATE_ADJUSTMENT_TABLE.get(&smplrate) {
-        println!("{:?}", cents_to_ctune_ftune(cents));
-        Ok(cents_to_ctune_ftune(cents))
+        println!("{:?}", Tuning::from_cents(cents));
+        Ok(Tuning::from_cents(cents))
     } else {
         Err(DSEError::SampleRateUnsupported(sample_rate))
     }
 }
-pub fn sample_rate_adjustment(sample_rate: f64, curve: usize, additional_adjust: i64) -> Result<(i8, i8), DSEError> {
-    let val = match curve {
+pub fn sample_rate_adjustment(sample_rate: f64, curve: usize, additional_adjust: i64) -> Result<Tuning, DSEError> {
+    let mut val = match curve {
         1 => sample_rate_adjustment_1(sample_rate),
         2 => sample_rate_adjustment_2(sample_rate),
         3 => sample_rate_adjustment_3(sample_rate),
-        4 => sample_rate_adjustment_4(sample_rate),
         _ => return Err(DSEError::Invalid("Invalid sample rate adjustment curve number!".to_string()))
     }?;
-    let (ctune, ftune) = val;
-    Ok(cents_to_ctune_ftune(ctune as i64 * 100 + ftune as i64 + additional_adjust))
+    val.add_cents(additional_adjust);
+    Ok(val)
 }
 
 // https://projectpokemon.org/docs/mystery-dungeon-nds/dse-swdl-format-r14/#SWDL_Header

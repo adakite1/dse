@@ -295,6 +295,65 @@ impl ADSRVolumeEnvelope {
 }
 impl AutoReadWrite for ADSRVolumeEnvelope {  }
 
+#[derive(Debug, Default, Copy, Clone, Reflect, Serialize, Deserialize)]
+pub struct Tuning {
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
+    #[serde(default)]
+    #[serde(rename = "@ftune")]
+    ftune: u8, // Pitch fine tuning, ranging from 0 to 255 with 255 representing +100 cents and 0 representing no change.
+    #[serde(deserialize_with = "deserialize_with::flattened_xml_attr")]
+    #[serde(default)]
+    #[serde(rename = "@ctune")]
+    ctune: i8 // Coarse tuning, possibly in semitones(?). Default is -7
+}
+impl Tuning {
+    pub fn new(ftune: u8, ctune: i8) -> Tuning {
+        Tuning { ftune, ctune }
+    }
+    pub fn from_cents(mut cents: i64) -> Tuning {
+        let mut sign = 1;
+        if cents == 0 {
+            return Tuning::new(0, 0);
+        } else if cents < 0 {
+            sign = -1;
+        }
+        cents = cents.abs();
+
+        let mut ctune = 0;
+        let mut ftune = cents;
+        while ftune >= 100 {
+            ftune -= 100;
+            ctune += 1;
+        }
+
+        ctune = sign * ctune;
+        ftune = sign * ftune;
+        if ftune < 0 {
+            ftune += 100;
+            ctune -= 1;
+        }
+
+        let ftune = ((ftune as f64 / 100.0) * 255.0).round() as u8;
+
+        Tuning::new(ftune, ctune as i8)
+    }
+    pub fn ftune(&self) -> u8 {
+        self.ftune
+    }
+    pub fn ctune(&self) -> i8 {
+        self.ctune
+    }
+    pub fn to_cents(&self) -> i64 {
+        self.ctune as i64 * 100 + ((self.ftune as f64 / 255.0) * 100.0).round() as i64
+    }
+    pub fn add_semitones(&mut self, semitones: i64) {
+        self.add_cents(semitones * 100);
+    }
+    pub fn add_cents(&mut self, cents: i64) {
+        *self = Self::from_cents(self.to_cents() + cents);
+    }
+}
+impl AutoReadWrite for Tuning {  }
 #[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct SampleInfo {
     #[serde(default = "GenericDefaultU16::<0xAA01>::value")]
@@ -303,10 +362,9 @@ pub struct SampleInfo {
 
     #[serde(rename = "@id")]
     pub id: u16,
-    #[serde(rename = "@ftune")]
-    pub ftune: i8, // Pitch fine tuning in cents(?)
-    #[serde(rename = "@ctune")]
-    pub ctune: i8, // Coarse tuning, possibly in semitones(?). Default is -7
+    #[serde(flatten)]
+    #[serde(rename = "@tuning")]
+    pub tuning: Tuning,
     #[serde(rename = "@rootkey")]
     pub rootkey: i8, // MIDI note
 
@@ -376,8 +434,7 @@ impl Default for SampleInfo {
         SampleInfo {
             unk1: 0xAA01,
             id: 0,
-            ftune: 0,
-            ctune: 0,
+            tuning: Tuning::new(0, 0),
             rootkey: 0,
             ktps: 0,
             volume: 0,
@@ -612,10 +669,9 @@ pub struct SplitEntry {
     #[serde(rename = "@SmplID")]
     pub SmplID: u16, // The ID/index of sample in the "wavi" chunk's lookup table.
     
-    #[serde(rename = "@ftune")]
-    pub ftune: i8, // Fine tune in cents.
-    #[serde(rename = "@ctune")]
-    pub ctune: i8, // Coarse tuning. Default is -7.
+    #[serde(flatten)]
+    #[serde(rename = "@tuning")]
+    pub tuning: Tuning,
     #[serde(rename = "@rootkey")]
     pub rootkey: i8, // Note at which the sample is sampled at!
     #[serde(default)]
@@ -662,8 +718,7 @@ impl Default for SplitEntry {
             unk16: 0,
             unk17: 0,
             SmplID: 0,
-            ftune: 0,
-            ctune: 0,
+            tuning: Tuning::new(0, 0),
             rootkey: 0,
             ktps: 0,
             smplvol: 0,
