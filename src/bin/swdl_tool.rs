@@ -84,11 +84,7 @@ enum Commands {
 
         /// Adjusts the pitch of all samples (in cents)
         #[arg(short = 'P', long, default_value_t = 0, allow_hyphen_values = true)]
-        pitch_adjust: i64,
-
-        /// The list of MIDI files to use for the built-in MIDI specific optimizations. An empty list (the default) skips these optimizations.
-        #[arg(short = 'm', long)]
-        midi_specific_optimization: Vec<PathBuf>
+        pitch_adjust: i64
     }
 }
 
@@ -129,7 +125,7 @@ fn main() -> Result<(), DSEError> {
 
             println!("\nAll files successfully processed.");
         }
-        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead, pitch_adjust, midi_specific_optimization } => {
+        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead, pitch_adjust } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;

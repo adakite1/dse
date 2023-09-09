@@ -74,11 +74,7 @@ enum Commands {
 
         // If `generate_optimized_swdl` is set, new swdl files specifically made for the inputted MIDI files will be generated. This is to handle larger bank files so that only the instruments needed for the MIDI file will be loaded.
         #[arg(long, action)]
-        generate_optimized_swdl: bool,
-
-        // If `output_xml` is set, instead of outputting `swdl` binaries, `swd.xml` files will be outputted instead.
-        #[arg(long, action)]
-        output_xml: bool
+        generate_optimized_swdl: bool
     }
 }
 
@@ -118,7 +114,7 @@ fn main() -> Result<(), DSEError> {
 
             println!("\nAll files successfully processed.");
         },
-        Commands::FromMIDI { input_glob, unk1, unk2, swdl: swdl_path, output_folder, midi_prgch, generate_optimized_swdl, output_xml } => {
+        Commands::FromMIDI { input_glob, unk1, unk2, swdl: swdl_path, output_folder, midi_prgch, generate_optimized_swdl } => {
             let (source_file_format, change_ext) = ("mid", "smd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
