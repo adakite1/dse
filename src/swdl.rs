@@ -3,11 +3,14 @@ use std::fmt::Display;
 use std::io::{Read, Write, Seek, SeekFrom, Cursor};
 use bevy_reflect::Reflect;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use phf::phf_map;
 use serde::{Serialize, Deserialize};
 
 use crate::peek_magic;
 use crate::dtype::{*};
 use crate::deserialize_with;
+
+pub mod sf2;
 
 /// By default, all unknown bytes that do not have a consistent pattern of values in the EoS roms are included in the XML.
 /// However, a subset of these not 100% purpose-certain bytes is 80% or something of values that have "typical" values.
@@ -1166,3 +1169,150 @@ impl ReadWrite for SWDL {
         Ok(())
     }
 }
+
+pub static BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE: phf::Map<u32, i64> = phf_map! {
+    8000_u32 => -2600_i64,	11025_u32 => -1858_i64,	11031_u32 => -1856_i64,	11069_u32 => -1841_i64,	
+    11281_u32 => -2013_i64,	14000_u32 => -1424_i64,	14002_u32 => -1423_i64,	14003_u32 => -1423_i64,	
+    14004_u32 => -1422_i64,	14007_u32 => -1421_i64,	14008_u32 => -1421_i64,	16000_u32 => -1400_i64,	
+    16002_u32 => -1399_i64,	16004_u32 => -1399_i64,	16006_u32 => -1398_i64,	16008_u32 => -1397_i64,	
+    16011_u32 => -1397_i64,	16013_u32 => -1396_i64,	16014_u32 => -1396_i64,	16015_u32 => -1396_i64,	
+    16016_u32 => -1395_i64,	16019_u32 => -1394_i64,	16020_u32 => -1394_i64,	16034_u32 => -1390_i64,	
+    18000_u32 => -1190_i64,	18001_u32 => -1189_i64,	18003_u32 => -1189_i64,	20000_u32 => -779_i64,	
+    22021_u32 => -664_i64,	22030_u32 => -662_i64,	22050_u32 => -658_i64,	22051_u32 => -658_i64,	
+    22052_u32 => -658_i64,	22053_u32 => -658_i64,	22054_u32 => -657_i64,	22055_u32 => -657_i64,	
+    22057_u32 => -657_i64,	22058_u32 => -657_i64,	22059_u32 => -656_i64,	22061_u32 => -656_i64,	
+    22062_u32 => -656_i64,	22063_u32 => -656_i64,	22064_u32 => -655_i64,	22066_u32 => -655_i64,	
+    22068_u32 => -655_i64,	22069_u32 => -654_i64,	22071_u32 => -654_i64,	22073_u32 => -654_i64,	
+    22074_u32 => -653_i64,	22075_u32 => -653_i64,	22076_u32 => -653_i64,	22077_u32 => -653_i64,	
+    22078_u32 => -653_i64,	22079_u32 => -652_i64,	22081_u32 => -652_i64,	22082_u32 => -652_i64,	
+    22084_u32 => -651_i64,	22085_u32 => -651_i64,	22086_u32 => -651_i64,	22087_u32 => -651_i64,	
+    22088_u32 => -651_i64,	22092_u32 => -650_i64,	22093_u32 => -650_i64,	22099_u32 => -648_i64,	
+    22102_u32 => -648_i64,	22106_u32 => -647_i64,	22108_u32 => -647_i64,	22112_u32 => -646_i64,	
+    22115_u32 => -645_i64,	22121_u32 => -644_i64,	22122_u32 => -644_i64,	22124_u32 => -643_i64,	
+    22132_u32 => -642_i64,	22133_u32 => -642_i64,	22142_u32 => -640_i64,	22148_u32 => -639_i64,	
+    22151_u32 => -638_i64,	22154_u32 => -637_i64,	22158_u32 => -637_i64,	22160_u32 => -636_i64,	
+    22167_u32 => -635_i64,	22171_u32 => -634_i64,	22179_u32 => -632_i64,	22180_u32 => -632_i64,	
+    22186_u32 => -631_i64,	22189_u32 => -630_i64,	22196_u32 => -629_i64,	22201_u32 => -628_i64,	
+    22202_u32 => -628_i64,	22213_u32 => -626_i64,	22223_u32 => -624_i64,	22226_u32 => -623_i64,	
+    22260_u32 => -616_i64,	22276_u32 => -613_i64,	22282_u32 => -612_i64,	22349_u32 => -599_i64,	
+    22400_u32 => -588_i64,	22406_u32 => -587_i64,	22450_u32 => -579_i64,	22508_u32 => -823_i64,	
+    22828_u32 => -761_i64,	22932_u32 => -740_i64,	22963_u32 => -734_i64,	23000_u32 => -727_i64,	
+    23100_u32 => -708_i64,	24000_u32 => -695_i64,	24011_u32 => -693_i64,	24014_u32 => -692_i64,	
+    24054_u32 => -685_i64,	25200_u32 => -378_i64,	26000_u32 => -396_i64,	26059_u32 => -386_i64,	
+    32000_u32 => -200_i64,	32001_u32 => -200_i64,	32004_u32 => -199_i64,	32005_u32 => -199_i64,	
+    32012_u32 => -198_i64,	32024_u32 => -196_i64,	32033_u32 => -195_i64,	32034_u32 => -195_i64,	
+    32044_u32 => -194_i64,	32057_u32 => -192_i64,	32065_u32 => -191_i64,	32105_u32 => -185_i64,	
+    32114_u32 => -184_i64,	32136_u32 => -181_i64,	44100_u32 => 542_i64,	44102_u32 => 542_i64,	
+    44103_u32 => 542_i64,	44110_u32 => 543_i64,	44112_u32 => 543_i64,	44131_u32 => 545_i64,	
+    44132_u32 => 545_i64,	44177_u32 => 549_i64,	44182_u32 => 550_i64,	44210_u32 => 553_i64,	
+    44225_u32 => 554_i64,	44249_u32 => 557_i64,	44539_u32 => 586_i64,	45158_u32 => 391_i64,	
+    45264_u32 => 401_i64,	45656_u32 => 439_i64
+};
+
+// https://projectpokemon.org/docs/mystery-dungeon-nds/dse-swdl-format-r14/#SWDL_Header
+pub const LOOKUP_TABLE_20_B0_F50: [i16; 128] = [
+    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 
+    0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F, 
+    0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017, 
+    0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F, 
+    0x0020, 0x0023, 0x0028, 0x002D, 0x0033, 0x0039, 0x0040, 0x0048, 
+    0x0050, 0x0058, 0x0062, 0x006D, 0x0078, 0x0083, 0x0090, 0x009E, 
+    0x00AC, 0x00BC, 0x00CC, 0x00DE, 0x00F0, 0x0104, 0x0119, 0x012F, 
+    0x0147, 0x0160, 0x017A, 0x0196, 0x01B3, 0x01D2, 0x01F2, 0x0214, 
+    0x0238, 0x025E, 0x0285, 0x02AE, 0x02D9, 0x0307, 0x0336, 0x0367, 
+    0x039B, 0x03D1, 0x0406, 0x0442, 0x047E, 0x04C4, 0x0500, 0x0546, 
+    0x058C, 0x0622, 0x0672, 0x06CC, 0x071C, 0x0776, 0x07DA, 0x0834, 
+    0x0898, 0x0906, 0x096A, 0x09D8, 0x0A50, 0x0ABE, 0x0B40, 0x0BB8, 
+    0x0C3A, 0x0CBC, 0x0D48, 0x0DDE, 0x0E6A, 0x0F00, 0x0FA0, 0x1040, 
+    0x10EA, 0x1194, 0x123E, 0x12F2, 0x13B0, 0x146E, 0x1536, 0x15FE, 
+    0x16D0, 0x17A2, 0x187E, 0x195A, 0x1A40, 0x1B30, 0x1C20, 0x1D1A, 
+    0x1E1E, 0x1F22, 0x2030, 0x2148, 0x2260, 0x2382, 0x2710, 0x7FFF
+];
+pub fn lookup_env_time_value_i16(msec: i16) -> i8 {
+    match LOOKUP_TABLE_20_B0_F50.binary_search(&msec) {
+        Ok(index) => index as i8,
+        Err(index) => {
+            if index == 0 { index as i8 }
+            else if index == LOOKUP_TABLE_20_B0_F50.len() { 127 }
+            else {
+                if (LOOKUP_TABLE_20_B0_F50[index] - msec) > (msec - LOOKUP_TABLE_20_B0_F50[index-1]) {
+                    (index - 1) as i8
+                } else {
+                    index as i8
+                }
+            }
+        }
+    }
+}
+pub const LOOKUP_TABLE_20_B1050: [i32; 128] = [
+    0x00000000, 0x00000004, 0x00000007, 0x0000000A, 
+    0x0000000F, 0x00000015, 0x0000001C, 0x00000024, 
+    0x0000002E, 0x0000003A, 0x00000048, 0x00000057, 
+    0x00000068, 0x0000007B, 0x00000091, 0x000000A8, 
+    0x00000185, 0x000001BE, 0x000001FC, 0x0000023F, 
+    0x00000288, 0x000002D6, 0x0000032A, 0x00000385, 
+    0x000003E5, 0x0000044C, 0x000004BA, 0x0000052E, 
+    0x000005A9, 0x0000062C, 0x000006B5, 0x00000746, 
+    0x00000BCF, 0x00000CC0, 0x00000DBD, 0x00000EC6, 
+    0x00000FDC, 0x000010FF, 0x0000122F, 0x0000136C, 
+    0x000014B6, 0x0000160F, 0x00001775, 0x000018EA, 
+    0x00001A6D, 0x00001BFF, 0x00001DA0, 0x00001F51, 
+    0x00002C16, 0x00002E80, 0x00003100, 0x00003395, 
+    0x00003641, 0x00003902, 0x00003BDB, 0x00003ECA, 
+    0x000041D0, 0x000044EE, 0x00004824, 0x00004B73, 
+    0x00004ED9, 0x00005259, 0x000055F2, 0x000059A4, 
+    0x000074CC, 0x000079AB, 0x00007EAC, 0x000083CE, 
+    0x00008911, 0x00008E77, 0x000093FF, 0x000099AA, 
+    0x00009F78, 0x0000A56A, 0x0000AB80, 0x0000B1BB, 
+    0x0000B81A, 0x0000BE9E, 0x0000C547, 0x0000CC17, 
+    0x0000FD42, 0x000105CB, 0x00010E82, 0x00011768, 
+    0x0001207E, 0x000129C4, 0x0001333B, 0x00013CE2, 
+    0x000146BB, 0x000150C5, 0x00015B02, 0x00016572, 
+    0x00017015, 0x00017AEB, 0x000185F5, 0x00019133, 
+    0x0001E16D, 0x0001EF07, 0x0001FCE0, 0x00020AF7, 
+    0x0002194F, 0x000227E6, 0x000236BE, 0x000245D7, 
+    0x00025532, 0x000264CF, 0x000274AE, 0x000284D0, 
+    0x00029536, 0x0002A5E0, 0x0002B6CE, 0x0002C802, 
+    0x000341B0, 0x000355F8, 0x00036A90, 0x00037F79, 
+    0x000394B4, 0x0003AA41, 0x0003C021, 0x0003D654, 
+    0x0003ECDA, 0x000403B5, 0x00041AE5, 0x0004326A, 
+    0x00044A45, 0x00046277, 0x00047B00, 0x7FFFFFFF
+];
+pub fn lookup_env_time_value_i32(msec: i32) -> i8 {
+    match LOOKUP_TABLE_20_B1050.binary_search(&msec) {
+        Ok(index) => index as i8,
+        Err(index) => {
+            if index == 0 { index as i8 }
+            else if index == LOOKUP_TABLE_20_B1050.len() { 127 }
+            else {
+                if (LOOKUP_TABLE_20_B1050[index] - msec) > (msec - LOOKUP_TABLE_20_B1050[index-1]) {
+                    (index - 1) as i8
+                } else {
+                    index as i8
+                }
+            }
+        }
+    }
+}
+
+pub fn create_swdl_shell(last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<SWDL, DSEError> {
+    let mut track_swdl = SWDL::default();
+    let (year, month, day, hour, minute, second, centisecond) = last_modified;
+    track_swdl.header.version = 0x415;
+    track_swdl.header.year = year;
+    track_swdl.header.month = month;
+    track_swdl.header.day = day;
+    track_swdl.header.hour = hour;
+    track_swdl.header.minute = minute;
+    track_swdl.header.second = second;
+    track_swdl.header.centisecond = centisecond;
+
+    if !fname.is_ascii() {
+        return Err(DSEError::DSEFileNameConversionNonASCII("SF2".to_string(), fname));
+    }
+    fname.truncate(15);
+    track_swdl.header.fname = DSEString::<0xAA>::try_from(fname)?;
+
+    Ok(track_swdl)
+}
+

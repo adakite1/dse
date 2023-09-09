@@ -9,6 +9,8 @@ use crate::peek_byte;
 use crate::dtype::*;
 use crate::deserialize_with;
 
+pub mod midi;
+
 /// By default, all unknown bytes that do not have a consistent pattern of values in the EoS roms are included in the XML.
 /// However, a subset of these not 100% purpose-certain bytes is 80% or something of values that have "typical" values.
 /// Setting this to true will strip all those somewhat certain bytes from the Serde serialization process, and replace them
@@ -728,3 +730,27 @@ impl ReadWrite for SMDL {
         Ok(())
     }
 }
+
+// Setup empty smdl object
+pub fn create_smdl_shell(last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<SMDL, DSEError> {
+    let mut smdl = SMDL::default();
+    let (year, month, day, hour, minute, second, centisecond) = last_modified;
+
+    smdl.header.version = 0x415;
+    smdl.header.year = year;
+    smdl.header.month = month;
+    smdl.header.day = day;
+    smdl.header.hour = hour;
+    smdl.header.minute = minute;
+    smdl.header.second = second;
+    smdl.header.centisecond = centisecond;
+
+    if !fname.is_ascii() {
+        return Err(DSEError::DSEFileNameConversionNonASCII("MIDI".to_string(), fname));
+    }
+    fname.truncate(15);
+    smdl.header.fname = DSEString::<0xFF>::try_from(fname)?;
+
+    Ok(smdl)
+}
+
