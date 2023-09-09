@@ -8,7 +8,7 @@ use crate::dtype::{DSEError, PointerTable};
 
 use dse_dsp_sys::process_mono;
 use soundfont::data::{SampleHeader, GeneratorType};
-use soundfont::{SoundFont2, Zone};
+use soundfont::{SoundFont2, Zone, Preset};
 
 use super::{BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE, lookup_env_time_value_i16, lookup_env_time_value_i32};
 
@@ -117,14 +117,14 @@ where
     Ok((first_available_id, sample_infos))
 }
 
-pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize, pitch_adjust: i64) {
+pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize, pitch_adjust: i64, map_presets: fn((usize, &Preset)) -> Option<u16>) {
     // Loop through the presets and use it to fill in the track swdl object
-    for preset in &sf2.presets {
+    for (preset, mapping) in sf2.presets.iter().enumerate().map(|(i, preset)| (i, preset, map_presets((i, preset)))).filter(|x| x.2.is_some()).map(|(_, preset, mapping)| (preset, mapping.unwrap())) {
         // Create blank programinfo object
         let mut program_info = ProgramInfo::default();
 
         // ID
-        program_info.header.id = preset.header.bank * 128 + preset.header.preset;
+        program_info.header.id = mapping;
         program_info.header.prgvol = 127;
         program_info.header.prgpan = 64;
         program_info.header.PadByte = 170;
