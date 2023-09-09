@@ -853,7 +853,10 @@ impl WAVIChunk {
 }
 impl ReadWrite for WAVIChunk {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer).map_err(|e| match e {
+            DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlWavi),
+            _ => e
+        })?)
     }
     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
@@ -887,7 +890,10 @@ impl PRGIChunk {
 }
 impl ReadWrite for PRGIChunk {
     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer)?)
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer).map_err(|e| match e {
+            DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlPrgi),
+            _ => e
+        })?)
     }
     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
@@ -1038,30 +1044,36 @@ impl SWDL {
     /// Regenerate length, slots, and nb parameters. To keep this working, `write_to_file` should never attempt to read or seek beyond alotted frame, which is initial cursor position and beyond.
     pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
-        self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))?.try_into().map_err(|_| DSEError::BinaryFileTooLarge(DSEFileType::SWDL))?;
         println!("flen {}", self.header.flen);
         if self.header.pcmdlen & 0xFFFF0000 == 0xAAAA0000 && self.pcmd.is_none() {
             // Expected case of separation with main bank. Noop
         } else if let Some(pcmd) = &mut self.pcmd {
-            self.header.pcmdlen = pcmd.data.len() as u32;
-            pcmd.header.chunklen = pcmd.data.len() as u32;
+            self.header.pcmdlen = pcmd.data.len().try_into().map_err(|_| DSEError::BinaryBlockTooLarge(DSEFileType::SWDL, DSEBlockType::SwdlPcmd))?;
+            pcmd.header.chunklen = self.header.pcmdlen;
         } else {
             // By default, assume that if the file does not contain a bank of its own, that the samples it refers to are in the main bank
             self.header.pcmdlen = 0xAAAA0000;
         }
-        self.header.nbwavislots = self.wavi.data.slots() as u16;
-        self.header.nbprgislots = self.prgi.as_ref().map(|prgi| prgi.data.slots() as u16).unwrap_or(128); // In the main bank, this is set to 128 even though there is no prgi chunk
-        self.header.wavilen = self.wavi.data.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        self.header.nbwavislots = self.wavi.data.slots().try_into().map_err(|_| DSEError::PointerTableTooLong(DSEBlockType::SwdlWavi))?;
+        self.header.nbprgislots = self.prgi.as_ref().map(|prgi| prgi.data.slots().try_into().map_err(|_| DSEError::PointerTableTooLong(DSEBlockType::SwdlPrgi))).unwrap_or(Ok(128))?; // In the main bank, this is set to 128 even though there is no prgi chunk
+        self.header.wavilen = self.wavi.data.write_to_file(&mut Cursor::new(&mut Vec::new())).map_err(|e| match e {
+            DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlWavi),
+            _ => e
+        })?.try_into().map_err(|_| DSEError::BinaryBlockTooLarge(DSEFileType::SWDL, DSEBlockType::SwdlWavi))?;
         self.wavi.header.chunklen = self.header.wavilen;
         if let Some(prgi) = &mut self.prgi {
-            prgi.header.chunklen = prgi.data.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
-            for obj in prgi.data.objects.iter_mut() {
-                obj.header.nbsplits = obj.splits_table.len() as u16;
-                obj.header.nblfos = obj.lfo_table.len() as u8;
+            prgi.header.chunklen = prgi.data.write_to_file(&mut Cursor::new(&mut Vec::new())).map_err(|e| match e {
+                DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlPrgi),
+                _ => e
+            })?.try_into().map_err(|_| DSEError::BinaryBlockTooLarge(DSEFileType::SWDL, DSEBlockType::SwdlPrgi))?;
+            for (i, obj) in prgi.data.objects.iter_mut().enumerate() {
+                obj.header.nbsplits = obj.splits_table.len().try_into().map_err(|_| DSEError::TableTooLong(DSEBlockType::SwdlPrgiProgramInfoSplits(i)))?;
+                obj.header.nblfos = obj.lfo_table.len().try_into().map_err(|_| DSEError::TableTooLong(DSEBlockType::SwdlPrgiProgramInfoLfos(i)))?;
             }
         }
         if let Some(kgrp) = &mut self.kgrp {
-            kgrp.header.chunklen = kgrp.data.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+            kgrp.header.chunklen = kgrp.data.write_to_file(&mut Cursor::new(&mut Vec::new()))?.try_into().map_err(|_| DSEError::BinaryBlockTooLarge(DSEFileType::SWDL, DSEBlockType::SwdlKgrp))?;
         }
         // ======== CHUNK LABELS ========
         self.header.magicn = 0x6C647773;

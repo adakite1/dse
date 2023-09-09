@@ -8,6 +8,26 @@ use crate::swdl::{ADSRVolumeEnvelope, DSEString, Tuning};
 
 use thiserror::Error;
 
+use strum::Display;
+
+#[derive(Debug, Display)]
+pub enum DSEFileType {
+    SWDL,
+    SMDL
+}
+#[derive(Debug, Display)]
+pub enum DSEBlockType {
+    Header,
+    SwdlWavi,
+    SwdlPrgi,
+    SwdlPrgiProgramInfoSplits(usize),
+    SwdlPrgiProgramInfoLfos(usize),
+    SwdlKgrp,
+    SwdlPcmd,
+    SwdlEoD,
+    SmdlTrkEvents(usize),
+}
+
 #[derive(Error, Debug)]
 pub enum DSEError {
     // #[error("data store disconnected")]
@@ -58,7 +78,7 @@ pub enum DSEError {
     DSESmfUnsupportedTimingSpecifier(),
     #[error("Sequencial MIDI files are not supported!")]
     DSESequencialSmfUnsupported(),
-    #[error("MIDI contains too many tracks to be converted to Smf0 format!")]
+    #[error("MIDI contains too many tracks to be converted to the Smf0 format!")]
     DSESmf0TooManyTracks(),
     #[error("Table<T> write_to_file: Self-index of object {0} is {0}. The self-index of an object in a table must match its actual index in the table!!")]
     TableNonMatchingSelfIndex(usize, usize),
@@ -67,6 +87,16 @@ pub enum DSEError {
     #[error("SWDL must contain a prgi chunk!")]
     DSESmdConverterSwdEmpty(),
 
+    #[error("Couldn't export as a binary {0} file! The final file was too large!!")]
+    BinaryFileTooLarge(DSEFileType),
+    #[error("Couldn't export as a binary {0} file! The {1} chunk was too large!")]
+    BinaryBlockTooLarge(DSEFileType, DSEBlockType),
+    #[error("The table for the {0} chunk contains too many slots!!")]
+    TableTooLong(DSEBlockType),
+    #[error("The pointer table for the {0} chunk contains too many slots!!")]
+    PointerTableTooLong(DSEBlockType),
+    #[error("The pointer table for the {0} chunk is too large, resulting in some pointers into the table overflowing!!")]
+    PointerTableTooLarge(DSEBlockType),
     #[error("MIDI messages too far apart to be converted into the Smf0 format!")]
     DSESmf0MessagesTooFarApart(),
     #[error("Some notes are too long to be converted!")]

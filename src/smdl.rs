@@ -272,7 +272,7 @@ pub mod events {
                 0x100..=0xFFFF => 2,
                 0x10000..=0xFFFFFF => 3,
                 _ => {
-                    return Err(DSEError::Invalid("Keydown duration needs to be within the range 0 to 0xFFFFFF".to_string()))?;
+                    return Err(DSEError::Invalid("Keydown duration needs to be within the range 0 to 0xFFFFFF".to_string()));
                 }
             };
 
@@ -695,7 +695,7 @@ impl DSELinkBytes for SMDL {
 impl SMDL {
     pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
-        self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))? as u32;
+        self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))?.try_into().map_err(|_| DSEError::BinaryFileTooLarge(DSEFileType::SMDL))?;
         self.song.nbtrks = self.trks.len() as u8;
         self.song.nbchans = self.trks.objects.iter().map(|x| x.preamble.chanid).max().ok_or(DSEError::Invalid("SMDL file contains zero tracks! Unable to automatically determine number of channels used!!".to_string()))? + 1;
         for trk in self.trks.objects.iter_mut() {
