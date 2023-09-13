@@ -168,9 +168,15 @@ fn main() -> Result<(), DSEError> {
                 }
 
                 // Vec of TrkChunkWriter's
-                let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::create(i as u8, i as u8, smdl.get_link_bytes(), 0).unwrap());
+                let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::create(i as u8, i as u8, smdl.get_link_bytes(), None).unwrap());
                 // Copy midi messages
-                let _ = copy_midi_messages(midi_messages, &mut trks, *midi_prgch)?;
+                let _ = copy_midi_messages(midi_messages, &mut trks, |bank, program, _| {
+                    if *midi_prgch {
+                        Some(bank * 128 + program)
+                    } else {
+                        None
+                    }
+                })?;
                 
                 // Get a list of swdl presets in the file provided
                 let mut prgi_ids_prune_list: Option<Vec<u16>> = prgi_objects.map(|prgi_objects| prgi_objects.iter().map(|x| x.header.id).collect());
@@ -179,7 +185,7 @@ fn main() -> Result<(), DSEError> {
                 smdl.trks.objects = trks.into_iter().map(|x| {
                     for id in x.programs_used() {
                         if let Some(prgi_ids_prune_list) = prgi_ids_prune_list.as_mut() {
-                            if let Some(idx) = prgi_ids_prune_list.iter().position(|&r| r == *id as u16) {
+                            if let Some(idx) = prgi_ids_prune_list.iter().position(|&r| r == id.to_dse() as u16) {
                                 prgi_ids_prune_list.remove(idx);
                             }
                         }

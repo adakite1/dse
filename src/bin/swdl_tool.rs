@@ -18,6 +18,8 @@ use fileutils::{VERSION, valid_file_of_type};
 use soundfont::SoundFont2;
 use fileutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, get_file_last_modified_date_with_default};
 
+use colored::Colorize;
+
 #[derive(Parser)]
 #[command(author = "Adakite", version = VERSION, about = "Tools for working with SWDL and SWDL.XML files", long_about = None)]
 #[command(propagate_version = true)]
@@ -149,7 +151,7 @@ fn main() -> Result<(), DSEError> {
                 
                 let sf2 = SoundFont2::load(&mut File::open(&input_file_path)?).map_err(|x| DSEError::SoundFontParseError(format!("{:?}", x)))?;
                 
-                let (first_id, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, *pitch_adjust, |(_, _)| true)?;
+                let (sample_mappings, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { ppmdu_mainbank: false, resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, *pitch_adjust, |_, _| true)?;
 
                 let fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
                     .to_str().ok_or(DSEError::DSEFileNameConversionNonUTF8("SF2".to_string(), input_file_path.display().to_string()))?
@@ -159,11 +161,11 @@ fn main() -> Result<(), DSEError> {
                 let mut track_swdl = create_swdl_shell(get_file_last_modified_date_with_default(&input_file_path)?, fname)?;
 
                 let mut prgi = PRGIChunk::new(0);
-                copy_presets(&sf2, &mut sample_infos, &mut prgi.data, first_id, *sample_rate_adjustment_curve, *pitch_adjust, |(_, preset)| Some(preset.header.bank * 128 + preset.header.preset));
+                copy_presets(&sf2, &mut sample_infos, &mut prgi.data, |i| Some(sample_mappings.get(&i).copied().ok_or(DSEError::WrapperString(format!("{}Failed to map sample {}!", "Internal Error: ".red(), i))).unwrap()), *sample_rate_adjustment_curve, *pitch_adjust, |_, preset, _| Some(preset.header.bank * 128 + preset.header.preset));
                 track_swdl.prgi = Some(prgi);
 
                 // Add the sample info objects last
-                track_swdl.wavi.data.objects = sample_infos;
+                track_swdl.wavi.data.objects = sample_infos.into_values().collect();
 
                 // Keygroups
                 let mut track_swdl_kgrp = KGRPChunk::default();

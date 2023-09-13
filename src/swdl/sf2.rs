@@ -1,3 +1,4 @@
+use std::collections::{HashMap, BTreeMap};
 use std::io::{Seek, Cursor, Read};
 
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
@@ -13,11 +14,12 @@ use soundfont::{SoundFont2, Zone, Preset};
 use super::{BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE, lookup_env_time_value_i16, lookup_env_time_value_i32};
 
 pub struct DSPOptions {
+    pub ppmdu_mainbank: bool,
     pub resample_threshold: u32,
     pub sample_rate: f64,
     pub adpcm_encoder_lookahead: i32
 }
-pub fn copy_raw_sample_data<R>(mut sf2file: R, sf2: &SoundFont2, bank: &mut SWDL, dsp_options: DSPOptions, sample_rate_adjustment_curve: usize, pitch_adjust: i64, filter_samples: fn(&(usize, &SampleHeader)) -> bool) -> Result<(usize, Vec<SampleInfo>), DSEError>
+pub fn copy_raw_sample_data<R>(mut sf2file: R, sf2: &SoundFont2, bank: &mut SWDL, dsp_options: DSPOptions, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_samples: impl FnMut(usize, &SampleHeader) -> bool) -> Result<(HashMap<u16, u16>, BTreeMap<u16, SampleInfo>), DSEError>
 where
     R: Read + Seek {
     let main_bank_swdl_pcmd = bank.pcmd.get_or_insert(PCMDChunk::default());
@@ -26,16 +28,20 @@ where
     let first_sample_pos = main_bank_swdl_wavi.data.objects.iter().map(|x| x.smplpos + (x.loopbeg + x.looplen) * 4).max().unwrap_or(0);
 
     // Create the SampleInfo entries for all the samples
-    let mut sample_infos = Vec::with_capacity(sf2.sample_headers.len());
+    let mut sample_infos = BTreeMap::new(); //::with_capacity(sf2.sample_headers.len())
     let first_available_id = main_bank_swdl_wavi.data.slots();
     let mut pos_in_memory = 0;
 
-    for (i, sample_header) in sf2.sample_headers.iter().enumerate().filter(filter_samples).enumerate().map(|(i, (_, sample_header))| (i, sample_header)) {
+    // Record the sample ID mappings
+    let mut sample_mappings = HashMap::new();
+
+    for (old_i, i, sample_header) in sf2.sample_headers.iter().enumerate().filter(|&(i, sample_header)| filter_samples(i, sample_header)).enumerate().map(|(i, (old_i, sample_header))| (old_i, i, sample_header)) {
         // Create blank sampleinfo object
         let mut sample_info = SampleInfo::default();
 
         // ID
         sample_info.id = (first_available_id + i) as u16;
+        sample_mappings.insert(old_i as u16, sample_info.id);
 
         sample_info.smplrate = sample_header.sample_rate;
         if sample_header.origpitch >= 128 { // origpitch - 255 is reserved for percussion by convention, 128-254 is invalid, but either way the SF2 standard recommends defaulting to 60 when 128-255 is encountered.
@@ -49,12 +55,15 @@ where
         sample_info.smplloop = false; // SF2 does not loop samples by default.
         // smplrate is up above with ctune and ftune
         // smplpos is at the bottom
-        sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
-        if sample_info.smplloop {
+        if sample_header.loop_start >= sample_header.start &&
+            sample_header.loop_end >= sample_header.loop_start {
+            sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
             sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
         } else {
-            // Not looping, so loop_end - loop_start is zero. Use end - loop_start instead
-            sample_info.looplen = (sample_header.end - sample_header.loop_start) / 2;
+            // Probably not looping, so loop_start could be zero. Manually set to zero instead.
+            sample_info.loopbeg = 0;
+            // Probably not looping, so loop_end - loop_start is zero. Use end - start instead.
+            sample_info.looplen = (sample_header.end - sample_header.start) / 2;
         }
         // Write sample into main bank
         if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
@@ -70,8 +79,9 @@ where
             } else {
                 sample_header.sample_rate as f64
             };
-            let raw_sample_data_len = raw_sample_data.len();
-            let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, dsp_options.adpcm_encoder_lookahead, ((raw_sample_data_len - 2) | 7) + 2, (sample_header.loop_start - sample_header.start) as usize);
+            let raw_sample_data_len_before = raw_sample_data.len();
+            let loop_start_by_sample_point = sample_info.loopbeg as usize * 2;
+            let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, dsp_options.adpcm_encoder_lookahead, ((raw_sample_data_len_before - 2) | 7) + 2, loop_start_by_sample_point);
             if new_loop_start == 4 {
                 new_loop_start = 0;
             }
@@ -81,13 +91,20 @@ where
             sample_info.tuning = tuning;
             sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
             sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
+            let mut raw_sample_data_len = raw_sample_data.len();
+            if dsp_options.ppmdu_mainbank {
+                if sample_info.loopbeg != 0 {
+                    sample_info.loopbeg -= sample_info.looplen;
+                }
+                raw_sample_data_len = (sample_info.loopbeg as usize + sample_info.looplen as usize) * 4;
+            }
 
             // Sample length is defined by `loopbeg` and `looplen`, which are both indices based around 32bits. To avoid overlapping samples, calculate how much padding is needed to align the samples to 4 bytes here
-            let alignment_padding_len = ((raw_sample_data.len() - 1) | 3) + 1 - raw_sample_data.len();
+            let alignment_padding_len = ((raw_sample_data_len - 1) | 3) + 1 - raw_sample_data_len;
 
             let mut cursor = Cursor::new(&mut main_bank_swdl_pcmd.data);
             cursor.seek(std::io::SeekFrom::End(0)).map_err(|_| DSEError::_InMemorySeekFailed())?;
-            for sample in raw_sample_data {
+            for sample in raw_sample_data.into_iter().take(raw_sample_data_len) {
                 cursor.write_u8(sample).map_err(|_| DSEError::_InMemoryWriteFailed())?;
             }
 
@@ -109,22 +126,21 @@ where
         pos_in_memory += (sample_info.loopbeg + sample_info.looplen) * 4;
 
         // Add the sampleinfo with the relative positions into the vec
-        sample_infos.push(sample_info_track_swdl);
+        sample_infos.insert(sample_info.id, sample_info_track_swdl);
         // Add the other sampleinfo object into the main bank's swdl
         main_bank_swdl_wavi.data.objects.push(sample_info);
     }
 
-    Ok((first_available_id, sample_infos))
+    Ok((sample_mappings, sample_infos))
 }
 
-pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize, pitch_adjust: i64, map_presets: fn((usize, &Preset)) -> Option<u16>) {
+pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
     // Loop through the presets and use it to fill in the track swdl object
-    for (preset, mapping) in sf2.presets.iter().enumerate().map(|(i, preset)| (i, preset, map_presets((i, preset)))).filter(|x| x.2.is_some()).map(|(_, preset, mapping)| (preset, mapping.unwrap())) {
+    for (i, preset) in sf2.presets.iter().enumerate() {
         // Create blank programinfo object
         let mut program_info = ProgramInfo::default();
 
         // ID
-        program_info.header.id = mapping;
         program_info.header.prgvol = 127;
         program_info.header.prgpan = 64;
         program_info.header.PadByte = 170;
@@ -136,7 +152,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
         /// Function to apply data from a zone to a split
         /// 
         /// Returns `true` if the zone provided is a global zone
-        fn apply_zone_data_to_split(split_entry: &mut SplitEntry, additive: bool, zone: &Zone, is_first_zone: bool, other_zones: &[&Zone], sample_infos: &mut Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize, pitch_adjust: i64) -> bool {
+        fn apply_zone_data_to_split(split_entry: &mut SplitEntry, additive: bool, zone: &Zone, is_first_zone: bool, other_zones: &[&Zone], sample_infos: &mut BTreeMap<u16, SampleInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64) -> bool {
             fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
                 zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
             }
@@ -260,7 +276,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                     soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
                     soundfont::data::GeneratorType::CoarseTune => {
                         if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                            let smpl = &sample_infos[sample_i as usize];
+                            let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
                             let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
                             tuning.add_semitones(*gen.amount.as_i16().unwrap() as i64);
                             tuning.add_semitones(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
@@ -274,7 +290,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                     },
                     soundfont::data::GeneratorType::FineTune => {
                         if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                            let smpl = &sample_infos[sample_i as usize];
+                            let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
                             let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
                             tuning.add_semitones(find_in_zones(&[&zone], soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
                             tuning.add_semitones(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
@@ -289,11 +305,11 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                     soundfont::data::GeneratorType::SampleID => {
                         possibly_a_global_zone = false;
                         // Check if the zone specifies which sample we have to use!
-                        split_entry.SmplID = first_available_id as u16 + gen.amount.as_u16().unwrap();
+                        split_entry.SmplID = map_samples(*gen.amount.as_u16().unwrap()).unwrap();
                     },
                     soundfont::data::GeneratorType::SampleModes => {
                         if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                            let smpl = &mut sample_infos[sample_i as usize];
+                            let smpl = sample_infos.get_mut(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
                             let flags = u16::from_ne_bytes(gen.amount.as_i16().unwrap().to_ne_bytes());
                             smpl.smplloop = (flags & 0x3) % 2 == 1;
                         }
@@ -329,7 +345,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
         }
 
         /// Function to create splits from zones
-        fn create_splits_from_zones(global_preset_zone: Option<&Zone>, preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &mut Vec<SampleInfo>, first_available_id: usize, sample_rate_adjustment_curve: usize, pitch_adjust: i64) -> Vec<SplitEntry> {
+        fn create_splits_from_zones(global_preset_zone: Option<&Zone>, preset_zone: &Zone, instrument_zones: &Vec<Zone>, sample_infos: &mut BTreeMap<u16, SampleInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64) -> Vec<SplitEntry> {
             let mut splits = Vec::with_capacity(instrument_zones.len());
             let mut global_instrument_zone: Option<&Zone> = None;
             for (i, instrument_zone) in instrument_zones.iter().enumerate() {
@@ -340,10 +356,15 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                 split.lovel = 0;
                 split.hivel = 127;
                 if let Some(&sample_i) = instrument_zone.sample() {
-                    let smpl_ref = &sample_infos[sample_i as usize];
-                    split.tuning = smpl_ref.tuning;
-                    split.rootkey = smpl_ref.rootkey;
-                    split.volume_envelope = smpl_ref.volume_envelope.clone();
+                    if let Some(mapping) = map_samples(sample_i) {
+                        let smpl_ref = sample_infos.get(&mapping).ok_or(DSEError::_SampleInPresetMissing(mapping)).unwrap();
+                        split.tuning = smpl_ref.tuning;
+                        split.rootkey = smpl_ref.rootkey;
+                        split.volume_envelope = smpl_ref.volume_envelope.clone();
+                    } else {
+                        println!("{}", format!("Sample associated with split unmapped! Skipping.").green());
+                        continue;
+                    }
                 } else if i != 0 {
                     println!("{}Some instrument zones contain no samples!", "Warning: ".yellow());
                     continue;
@@ -357,7 +378,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                 split.smplpan = 64;
                 split.kgrpid = 0;
                 if let Some(global_instrument_zone) = global_instrument_zone {
-                    apply_zone_data_to_split(&mut split, false, global_instrument_zone, false, &[preset_zone, instrument_zone], sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
+                    apply_zone_data_to_split(&mut split, false, global_instrument_zone, false, &[preset_zone, instrument_zone], sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
                 }
                 if apply_zone_data_to_split(&mut split, false, instrument_zone, i == 0, &(|| {
                     let mut other_zones = Vec::new();
@@ -369,7 +390,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                         other_zones.push(global_preset_zone);
                     }
                     other_zones
-                })(), sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust) {
+                })(), sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust) {
                     global_instrument_zone = Some(instrument_zone);
                     is_global = true;
                 }
@@ -380,7 +401,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                             other_zones.push(global_instrument_zone);
                         }
                         other_zones
-                    })(), sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
+                    })(), sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
                 }
                 apply_zone_data_to_split(&mut split, true, preset_zone, false, &(|| {
                     let mut other_zones = vec![instrument_zone];
@@ -388,7 +409,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
                         other_zones.push(global_instrument_zone);
                     }
                     other_zones
-                })(), sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust);
+                })(), sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
                 if !is_global { // If this split represents a global instrument zone it should not be included.
                     splits.push(split);
                 }
@@ -401,7 +422,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
         let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
             if let Some(&instrument_i) = preset_zone.instrument() {
                 let instrument = &sf2.instruments[instrument_i as usize];
-                create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, sample_infos, first_available_id, sample_rate_adjustment_curve, pitch_adjust)
+                create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust)
             } else if i == 0 {
                 global_preset_zone = Some(preset_zone);
                 println!("{}", "Global preset zone detected!".green());
@@ -417,7 +438,10 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut Vec<SampleInfo>, prgi_p
         program_info.splits_table.objects = splits;
 
         // Add to the prgi chunk
-        prgi_pointer_table.objects.push(program_info);
+        if let Some(mapping) = map_presets(i, preset, &program_info) {
+            program_info.header.id = mapping;
+            prgi_pointer_table.objects.push(program_info);
+        }
     }
 }
 

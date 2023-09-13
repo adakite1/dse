@@ -1,5 +1,5 @@
 use core::panic;
-use std::io::{Read, Write, Seek, SeekFrom, Cursor};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use serde::{Serialize, Deserialize};
@@ -28,6 +28,10 @@ pub enum DSEBlockType {
     SmdlTrkEvents(usize),
 }
 
+pub trait DSEWrappableError: std::error::Error + Display + Debug {  }
+impl<E> DSEWrappableError for E
+where
+    E: std::error::Error + Display + Debug {  }
 #[derive(Error, Debug)]
 pub enum DSEError {
     // #[error("data store disconnected")]
@@ -52,6 +56,12 @@ pub enum DSEError {
     SmfParseError(String),
     #[error("Glob Pattern Error: {0}")]
     GlobPatternError(#[from] glob::PatternError),
+    // Intended for outside callers
+    #[error("Wrapped Error: {0}")]
+    Wrapper(Box<dyn DSEWrappableError>),
+    // Intended for outside callers
+    #[error("Wrapped Error: {0}")]
+    WrapperString(String),
 
     #[error("Failed to find sample {0} at {1}.")]
     SampleFindError(String, u64),
@@ -119,6 +129,8 @@ pub enum DSEError {
     _ValidHashMapKeyRemovalFailed(),
     #[error("Corresponding note on event with known index missing!")]
     _CorrespondingNoteOnNotFound(),
+    #[error("Sample {0} specified in a preset is missing from `sample_infos`!")]
+    _SampleInPresetMissing(u16),
 
     // Intended for use when a function wants to delegate the elaboration of an error to its parent caller
     #[error("Parent caller should have overwritten this")]
