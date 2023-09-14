@@ -7,7 +7,7 @@ use crate::math::{timecents_to_milliseconds, gain};
 use crate::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, ProgramInfo, SplitEntry, LFOEntry, PCMDChunk, Tuning};
 use crate::dtype::{DSEError, PointerTable};
 
-use dse_dsp_sys::process_mono;
+use dse_dsp_sys::{process_mono, resampler16_getMaxOutLen, resampler16_create};
 use soundfont::data::{SampleHeader, GeneratorType};
 use soundfont::{SoundFont2, Zone, Preset};
 
@@ -55,20 +55,22 @@ where
         sample_info.smplloop = false; // SF2 does not loop samples by default.
         // smplrate is up above with ctune and ftune
         // smplpos is at the bottom
-        if sample_header.loop_start >= sample_header.start &&
-            sample_header.loop_end >= sample_header.loop_start {
+        if sample_header.loop_start >= sample_header.start {
             sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
-            sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
         } else {
             // Probably not looping, so loop_start could be zero. Manually set to zero instead.
             sample_info.loopbeg = 0;
+        }
+        if sample_header.loop_end >= sample_header.loop_start {
+            sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
+        } else {
             // Probably not looping, so loop_end - loop_start is zero. Use end - start instead.
             sample_info.looplen = (sample_header.end - sample_header.start) / 2;
         }
         // Write sample into main bank
         if let Some(chunk) = sf2.sample_data.smpl.as_ref() {
             let sample_pos_bytes = chunk.offset() + 8 + sample_header.start as u64 * 2;
-            let mut raw_sample_data = vec![0_i16; (sample_info.loopbeg + sample_info.looplen) as usize * 2];
+            let mut raw_sample_data = vec![0_i16; (sample_header.end - sample_header.start) as usize];
 
             sf2file.seek(std::io::SeekFrom::Start(sample_pos_bytes)).map_err(|_| DSEError::SampleFindError(sample_header.name.clone(), sample_pos_bytes))?;
             sf2file.read_i16_into::<LittleEndian>(&mut raw_sample_data).map_err(|_| DSEError::SampleReadError(sample_header.name.clone(), sample_pos_bytes, raw_sample_data.len()))?;
@@ -79,28 +81,38 @@ where
             } else {
                 sample_header.sample_rate as f64
             };
-            let raw_sample_data_len_before = raw_sample_data.len();
-            let loop_start_by_sample_point = sample_info.loopbeg as usize * 2;
-            let (raw_sample_data, mut new_loop_start) = process_mono(raw_sample_data.into(), sample_header.sample_rate as f64, new_sample_rate, dsp_options.adpcm_encoder_lookahead, ((raw_sample_data_len_before - 2) | 7) + 2, loop_start_by_sample_point);
-            if new_loop_start == 4 {
-                new_loop_start = 0;
-            }
+            let preferred_samples_per_block = unsafe {
+                let resampler16 = resampler16_create(sample_header.sample_rate as f64, new_sample_rate, raw_sample_data.len() as i32, 2.0);
+                resampler16_getMaxOutLen(resampler16, raw_sample_data.len() as i32) as usize
+            };
+            let (raw_sample_data, new_loop_bounds) = process_mono(
+                raw_sample_data.into(),
+                sample_header.sample_rate as f64,
+                new_sample_rate,
+                dsp_options.adpcm_encoder_lookahead,
+                ((preferred_samples_per_block - 2) | 7) + 2,
+                &[
+                    sample_info.loopbeg as usize * 2,
+                    (sample_info.loopbeg + sample_info.looplen) as usize * 2
+                ]);
+            let new_loop_bounds = new_loop_bounds.unwrap();
             sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
             let mut tuning = sample_rate_adjustment(new_sample_rate, sample_rate_adjustment_curve, pitch_adjust)?;
             tuning.add_cents(sample_header.pitchadj as i64);
             sample_info.tuning = tuning;
-            sample_info.loopbeg = new_loop_start as u32 / 4; // Set new loopbeg
-            sample_info.looplen = (raw_sample_data.len() - new_loop_start) as u32 / 4; // Set new looplen
-            let mut raw_sample_data_len = raw_sample_data.len();
+            let raw_sample_data_len_32 = (raw_sample_data.len() as f64 / 4.0).floor() as u32;
+            sample_info.loopbeg = (new_loop_bounds[0] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32; // Set new loopbeg
+            sample_info.looplen = (new_loop_bounds[1] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32 - sample_info.loopbeg; // Set new looplen
+            // sample_info.looplen = raw_sample_data_len_32 - sample_info.loopbeg;
             if dsp_options.ppmdu_mainbank {
-                if sample_info.loopbeg != 0 {
+                if sample_info.loopbeg >= sample_info.looplen {
                     sample_info.loopbeg -= sample_info.looplen;
                 }
-                raw_sample_data_len = (sample_info.loopbeg as usize + sample_info.looplen as usize) * 4;
             }
+            let raw_sample_data_len = (sample_info.loopbeg as usize + sample_info.looplen as usize) * 4;
 
             // Sample length is defined by `loopbeg` and `looplen`, which are both indices based around 32bits. To avoid overlapping samples, calculate how much padding is needed to align the samples to 4 bytes here
-            let alignment_padding_len = ((raw_sample_data_len - 1) | 3) + 1 - raw_sample_data_len;
+            // let alignment_padding_len = ((raw_sample_data_len - 1) | 3) + 1 - raw_sample_data_len;
 
             let mut cursor = Cursor::new(&mut main_bank_swdl_pcmd.data);
             cursor.seek(std::io::SeekFrom::End(0)).map_err(|_| DSEError::_InMemorySeekFailed())?;
@@ -109,9 +121,9 @@ where
             }
 
             // Write in the padding
-            for _ in 0..alignment_padding_len {
-                cursor.write_u8(0x00).map_err(|_| DSEError::_InMemoryWriteFailed())?; //Todo: might be better to use some other method of padding to avoid artifacts
-            }
+            // for _ in 0..alignment_padding_len {
+            //     cursor.write_u8(0x00).map_err(|_| DSEError::_InMemoryWriteFailed())?; //Todo: might be better to use some other method of padding to avoid artifacts
+            // }
         } else {
             println!("{}SF2 file does not contain any sample data!", "Warning: ".yellow());
         }
@@ -312,6 +324,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                             let smpl = sample_infos.get_mut(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
                             let flags = u16::from_ne_bytes(gen.amount.as_i16().unwrap().to_ne_bytes());
                             smpl.smplloop = (flags & 0x3) % 2 == 1;
+                            // smpl.smplloop = false;
                         }
                     },
                     soundfont::data::GeneratorType::Reserved3 => {  },
