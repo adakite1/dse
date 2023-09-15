@@ -173,6 +173,7 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
     Ok(global_tick)
 }
 
+#[derive(Debug)]
 pub struct ProgramUsed {
     pub bank: u8,
     pub program: u8,

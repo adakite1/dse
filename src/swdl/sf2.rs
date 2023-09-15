@@ -55,13 +55,13 @@ where
         sample_info.smplloop = false; // SF2 does not loop samples by default.
         // smplrate is up above with ctune and ftune
         // smplpos is at the bottom
-        if sample_header.loop_start >= sample_header.start {
+        if sample_header.loop_start > sample_header.start {
             sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
         } else {
             // Probably not looping, so loop_start could be zero. Manually set to zero instead.
             sample_info.loopbeg = 0;
         }
-        if sample_header.loop_end >= sample_header.loop_start {
+        if sample_header.loop_end > sample_header.loop_start {
             sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
         } else {
             // Probably not looping, so loop_end - loop_start is zero. Use end - start instead.
@@ -164,7 +164,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
         /// Function to apply data from a zone to a split
         /// 
         /// Returns `true` if the zone provided is a global zone
-        fn apply_zone_data_to_split(split_entry: &mut SplitEntry, additive: bool, zone: &Zone, is_first_zone: bool, other_zones: &[&Zone], sample_infos: &mut BTreeMap<u16, SampleInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64) -> bool {
+        fn apply_zone_data_to_split(split_entry: &mut SplitEntry, additive: Option<&[&Zone]>, zone: &Zone, sample_infos: &mut BTreeMap<u16, SampleInfo>, sample_i: u16, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64) {
             fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
                 zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
             }
@@ -173,18 +173,18 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                 to_range.0 + (s - from_range.0) * (to_range.1 - to_range.0) / (from_range.1 - from_range.0)
             }
             
-            let mut possibly_a_global_zone = true;
+            let (mut attack, mut hold, mut decay, mut release) = (None, None, None, None);
+            let fill_env_from_additive_source = |param: &mut Option<i16>, gen_ty: soundfont::data::GeneratorType| {
+                if let None = param {
+                    *param = additive.map_or(None,
+                        |additive_source_zones| find_in_zones(
+                            additive_source_zones,
+                            gen_ty
+                        ).map(|g| *g.amount.as_i16().unwrap()));
+                }
+            };
+
             // Loop through all the generators in this zone
-            let (mut attack, mut hold, mut decay, mut release) = (
-                find_in_zones(other_zones, soundfont::data::GeneratorType::AttackVolEnv)
-                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                find_in_zones(other_zones, soundfont::data::GeneratorType::HoldVolEnv)
-                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                find_in_zones(other_zones, soundfont::data::GeneratorType::DecayVolEnv)
-                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-                find_in_zones(other_zones, soundfont::data::GeneratorType::ReleaseVolEnv)
-                    .map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0),
-            );
             for gen in zone.gen_list.iter() {
                 match gen.ty {
                     soundfont::data::GeneratorType::StartAddrsOffset => {  },
@@ -206,7 +206,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::ReverbEffectsSend => {  },
                     soundfont::data::GeneratorType::Pan => {
                         split_entry.smplpan = map_range((-500.0, 500.0), (0.0, 127.0), (
-                            *gen.amount.as_i16().unwrap() + if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::Pan).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }
+                            *gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::Pan).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }
                         ) as f64).round() as i8;
                     },
                     soundfont::data::GeneratorType::Unused2 => {  },
@@ -226,52 +226,54 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::KeynumToModEnvDecay => {  },
                     soundfont::data::GeneratorType::DelayVolEnv => {  },
                     soundfont::data::GeneratorType::AttackVolEnv => {
-                        if additive {
-                            attack += *gen.amount.as_i16().unwrap();
+                        if let Some(_) = additive  {
+                            fill_env_from_additive_source(&mut attack, soundfont::data::GeneratorType::AttackVolEnv);
+                            attack = Some(attack.unwrap_or(0) + *gen.amount.as_i16().unwrap());
                         } else {
-                            attack = *gen.amount.as_i16().unwrap();
+                            attack = Some(*gen.amount.as_i16().unwrap());
                         }
                     },
                     soundfont::data::GeneratorType::HoldVolEnv => {
-                        if additive {
-                            hold += *gen.amount.as_i16().unwrap();
+                        if let Some(_) = additive {
+                            fill_env_from_additive_source(&mut hold, soundfont::data::GeneratorType::HoldVolEnv);
+                            hold = Some(hold.unwrap_or(0) + *gen.amount.as_i16().unwrap());
                         } else {
-                            hold = *gen.amount.as_i16().unwrap();
+                            hold = Some(*gen.amount.as_i16().unwrap());
                         }
                     },
                     soundfont::data::GeneratorType::DecayVolEnv => {
-                        if additive {
-                            decay += *gen.amount.as_i16().unwrap();
+                        if let Some(_) = additive {
+                            fill_env_from_additive_source(&mut decay, soundfont::data::GeneratorType::DecayVolEnv);
+                            decay = Some(decay.unwrap_or(0) + *gen.amount.as_i16().unwrap());
                         } else {
-                            decay = *gen.amount.as_i16().unwrap();
+                            decay = Some(*gen.amount.as_i16().unwrap());
                         }
                     },
                     soundfont::data::GeneratorType::SustainVolEnv => {
-                        let decibels = -(gen.amount.as_i16().unwrap() + if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::SustainVolEnv).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                        let decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::SustainVolEnv).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
                         split_entry.volume_envelope.sustain = (gain(decibels) * 127.0).round() as i8;
                     },
                     soundfont::data::GeneratorType::ReleaseVolEnv => {
-                        if additive {
-                            release += *gen.amount.as_i16().unwrap();
+                        if let Some(_) = additive {
+                            fill_env_from_additive_source(&mut release, soundfont::data::GeneratorType::ReleaseVolEnv);
+                            release = Some(release.unwrap_or(0) + *gen.amount.as_i16().unwrap());
                         } else {
-                            release = *gen.amount.as_i16().unwrap();
+                            release = Some(*gen.amount.as_i16().unwrap());
                         }
                     },
                     soundfont::data::GeneratorType::KeynumToVolEnvHold => {  },
                     soundfont::data::GeneratorType::KeynumToVolEnvDecay => {  },
-                    soundfont::data::GeneratorType::Instrument => {
-                        possibly_a_global_zone = false;
-                    },
+                    soundfont::data::GeneratorType::Instrument => {  },
                     soundfont::data::GeneratorType::Reserved1 => {  },
                     soundfont::data::GeneratorType::KeyRange => {
-                        if !additive {
+                        if let None = additive {
                             let key_range_value = gen.amount.as_range().unwrap();
                             split_entry.lowkey = key_range_value.low as i8;
                             split_entry.hikey = key_range_value.high as i8;
                         }
                     },
                     soundfont::data::GeneratorType::VelRange => {
-                        if !additive {
+                        if let None = additive {
                             let vel_range_value = gen.amount.as_range().unwrap();
                             split_entry.lovel = vel_range_value.low as i8;
                             split_entry.hivel = vel_range_value.high as i8;
@@ -281,58 +283,44 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::Keynum => {  },
                     soundfont::data::GeneratorType::Velocity => {  },
                     soundfont::data::GeneratorType::InitialAttenuation => {
-                        let decibels = -(gen.amount.as_i16().unwrap() + if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
-                        split_entry.volume_envelope.atkvol = (gain(decibels) * 127.0).round() as i8;
+                        let decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                        split_entry.smplvol = (gain(decibels) * 127.0).round() as i8;
                     },
                     soundfont::data::GeneratorType::Reserved2 => {  },
                     soundfont::data::GeneratorType::EndloopAddrsCoarseOffset => {  },
                     soundfont::data::GeneratorType::CoarseTune => {
-                        if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                            let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
-                            let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
-                            tuning.add_semitones(*gen.amount.as_i16().unwrap() as i64);
-                            tuning.add_semitones(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
-                            tuning.add_cents(find_in_zones(&[&zone], soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
-                            tuning.add_cents(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
-                            split_entry.tuning = tuning;
-                        } else {
-                            println!("{}Some instrument zones contain no samples! Could not calculate necessary ctune to adjust for sample rate. Skipping...", "Warning: ".yellow());
-                            continue;
-                        }
+                        let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
+                        let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
+                        tuning.add_semitones(*gen.amount.as_i16().unwrap() as i64);
+                        tuning.add_semitones(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        tuning.add_cents(find_in_zones(&[&zone], soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
+                        tuning.add_cents(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        split_entry.tuning = tuning;
                     },
                     soundfont::data::GeneratorType::FineTune => {
-                        if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                            let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
-                            let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
-                            tuning.add_semitones(find_in_zones(&[&zone], soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
-                            tuning.add_semitones(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
-                            tuning.add_cents(*gen.amount.as_i16().unwrap() as i64);
-                            tuning.add_cents(if additive { find_in_zones(other_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
-                            split_entry.tuning = tuning;
-                        } else {
-                            println!("{}Some instrument zones contain no samples! Could not calculate necessary ftune to adjust for sample rate. Skipping...", "Warning: ".yellow());
-                            continue;
-                        }
+                        let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
+                        let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
+                        tuning.add_semitones(find_in_zones(&[&zone], soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
+                        tuning.add_semitones(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        tuning.add_cents(*gen.amount.as_i16().unwrap() as i64);
+                        tuning.add_cents(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        split_entry.tuning = tuning;
                     },
                     soundfont::data::GeneratorType::SampleID => {
-                        possibly_a_global_zone = false;
                         // Check if the zone specifies which sample we have to use!
                         split_entry.SmplID = map_samples(*gen.amount.as_u16().unwrap()).unwrap();
                     },
                     soundfont::data::GeneratorType::SampleModes => {
-                        if let Some(&sample_i) = zone.sample().or_else(|| other_zones.iter().map(|x| x.sample()).find(Option::is_some).flatten()) {
-                            let smpl = sample_infos.get_mut(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
-                            let flags = u16::from_ne_bytes(gen.amount.as_i16().unwrap().to_ne_bytes());
-                            smpl.smplloop = (flags & 0x3) % 2 == 1;
-                            // smpl.smplloop = false;
-                        }
+                        let smpl = sample_infos.get_mut(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
+                        let flags = u16::from_ne_bytes(gen.amount.as_i16().unwrap().to_ne_bytes());
+                        smpl.smplloop = (flags & 0x3) % 2 == 1;
                     },
                     soundfont::data::GeneratorType::Reserved3 => {  },
                     soundfont::data::GeneratorType::ScaleTuning => {  },
                     soundfont::data::GeneratorType::ExclusiveClass => {  },
                     soundfont::data::GeneratorType::OverridingRootKey => {
                         let val = *gen.amount.as_i16().unwrap();
-                        if val != -1 && !additive {
+                        if val != -1 && additive.is_none() {
                             split_entry.rootkey = val as i8;
                         }
                     },
@@ -340,21 +328,37 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::EndOper => {  },
                 }
             }
-            let (envmult, _) = timecents_to_index(*[attack, hold, decay, release].iter().max().unwrap());
-            split_entry.volume_envelope.envmult = envmult;
-            if envmult == 0 { // Use i32 lookup
-                split_entry.volume_envelope.attack = lookup_env_time_value_i32(timecents_to_milliseconds(attack));
-                split_entry.volume_envelope.hold = lookup_env_time_value_i32(timecents_to_milliseconds(hold));
-                split_entry.volume_envelope.decay = lookup_env_time_value_i32(timecents_to_milliseconds(decay));
-                split_entry.volume_envelope.release = lookup_env_time_value_i32(timecents_to_milliseconds(release));
-            } else { // Use i16 lookup
-                split_entry.volume_envelope.attack = lookup_env_time_value_i16(timecents_to_milliseconds(attack) as i16);
-                split_entry.volume_envelope.hold = lookup_env_time_value_i16(timecents_to_milliseconds(hold) as i16);
-                split_entry.volume_envelope.decay = lookup_env_time_value_i16(timecents_to_milliseconds(decay) as i16);
-                split_entry.volume_envelope.release = lookup_env_time_value_i16(timecents_to_milliseconds(release) as i16);
+            let max_envelope_value = [attack, hold, decay, release].iter().filter_map(|x| x.as_ref()).max().map(|x| timecents_to_index(*x));
+            if let Some((envmult, _)) = max_envelope_value {
+                split_entry.volume_envelope.envmult = envmult;
+                if envmult == 0 { // Use i32 lookup
+                    if let Some(attack) = attack {
+                        split_entry.volume_envelope.attack = lookup_env_time_value_i32(timecents_to_milliseconds(attack));
+                    }
+                    if let Some(hold) = hold {
+                        split_entry.volume_envelope.hold = lookup_env_time_value_i32(timecents_to_milliseconds(hold));
+                    }
+                    if let Some(decay) = decay {
+                        split_entry.volume_envelope.decay = lookup_env_time_value_i32(timecents_to_milliseconds(decay));
+                    }
+                    if let Some(release) = release {
+                        split_entry.volume_envelope.release = lookup_env_time_value_i32(timecents_to_milliseconds(release));
+                    }
+                } else { // Use i16 lookup
+                    if let Some(attack) = attack {
+                        split_entry.volume_envelope.attack = lookup_env_time_value_i16(timecents_to_milliseconds(attack) as i16);
+                    }
+                    if let Some(hold) = hold {
+                        split_entry.volume_envelope.hold = lookup_env_time_value_i16(timecents_to_milliseconds(hold) as i16);
+                    }
+                    if let Some(decay) = decay {
+                        split_entry.volume_envelope.decay = lookup_env_time_value_i16(timecents_to_milliseconds(decay) as i16);
+                    }
+                    if let Some(release) = release {
+                        split_entry.volume_envelope.release = lookup_env_time_value_i16(timecents_to_milliseconds(release) as i16);
+                    }
+                }
             }
-            
-            possibly_a_global_zone && is_first_zone
         }
 
         /// Function to create splits from zones
@@ -363,7 +367,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
             let mut global_instrument_zone: Option<&Zone> = None;
             for (i, instrument_zone) in instrument_zones.iter().enumerate() {
                 let mut split = SplitEntry::default();
-                let mut is_global = false;
+                let mut skip_this_split = false;
                 split.lowkey = 0;
                 split.hikey = 127;
                 split.lovel = 0;
@@ -390,40 +394,38 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                 split.smplvol = 127;
                 split.smplpan = 64;
                 split.kgrpid = 0;
-                if let Some(global_instrument_zone) = global_instrument_zone {
-                    apply_zone_data_to_split(&mut split, false, global_instrument_zone, false, &[preset_zone, instrument_zone], sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
-                }
-                if apply_zone_data_to_split(&mut split, false, instrument_zone, i == 0, &(|| {
-                    let mut other_zones = Vec::new();
+
+                if let Some(&sample_i) = instrument_zone.sample() {
                     if let Some(global_instrument_zone) = global_instrument_zone {
-                        other_zones.push(global_instrument_zone);
+                        apply_zone_data_to_split(&mut split, None, global_instrument_zone, sample_infos, sample_i, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
                     }
-                    other_zones.push(preset_zone);
+                    apply_zone_data_to_split(&mut split, None, instrument_zone, sample_infos, sample_i, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
                     if let Some(global_preset_zone) = global_preset_zone {
-                        other_zones.push(global_preset_zone);
+                        apply_zone_data_to_split(&mut split, Some(&(|| {
+                            let mut additive_source_zones = vec![instrument_zone];
+                            if let Some(global_instrument_zone) = global_instrument_zone {
+                                additive_source_zones.push(global_instrument_zone);
+                            }
+                            additive_source_zones
+                        })()), global_preset_zone, sample_infos, sample_i, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
                     }
-                    other_zones
-                })(), sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust) {
-                    global_instrument_zone = Some(instrument_zone);
-                    is_global = true;
-                }
-                if let Some(global_preset_zone) = global_preset_zone {
-                    apply_zone_data_to_split(&mut split, true, global_preset_zone, false, &(|| {
-                        let mut other_zones = vec![instrument_zone];
+                    apply_zone_data_to_split(&mut split, Some(&(|| {
+                        let mut additive_source_zones = vec![instrument_zone];
                         if let Some(global_instrument_zone) = global_instrument_zone {
-                            other_zones.push(global_instrument_zone);
+                            additive_source_zones.push(global_instrument_zone);
                         }
-                        other_zones
-                    })(), sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
+                        additive_source_zones
+                    })()), preset_zone, sample_infos, sample_i, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
+                } else if i == 0 {
+                    global_instrument_zone = Some(instrument_zone);
+                    skip_this_split = true;
+                    println!("{}", "Global instrument zone detected!".green());
+                } else {
+                    skip_this_split = true;
+                    println!("{}Some instrument zones contain no samples!", "Warning: ".yellow());
                 }
-                apply_zone_data_to_split(&mut split, true, preset_zone, false, &(|| {
-                    let mut other_zones = vec![instrument_zone];
-                    if let Some(global_instrument_zone) = global_instrument_zone {
-                        other_zones.push(global_instrument_zone);
-                    }
-                    other_zones
-                })(), sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust);
-                if !is_global { // If this split represents a global instrument zone it should not be included.
+
+                if !skip_this_split { // If this split represents a global instrument zone or is missing a corresponding sample it should not be included.
                     splits.push(split);
                 }
             }
