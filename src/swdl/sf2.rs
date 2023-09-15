@@ -55,15 +55,13 @@ where
         sample_info.smplloop = false; // SF2 does not loop samples by default.
         // smplrate is up above with ctune and ftune
         // smplpos is at the bottom
-        if sample_header.loop_start > sample_header.start {
+        if sample_header.loop_start >= sample_header.start &&
+            sample_header.loop_end > sample_header.loop_start {
             sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
+            sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
         } else {
             // Probably not looping, so loop_start could be zero. Manually set to zero instead.
             sample_info.loopbeg = 0;
-        }
-        if sample_header.loop_end > sample_header.loop_start {
-            sample_info.looplen = (sample_header.loop_end - sample_header.loop_start) / 2;
-        } else {
             // Probably not looping, so loop_end - loop_start is zero. Use end - start instead.
             sample_info.looplen = (sample_header.end - sample_header.start) / 2;
         }
@@ -85,7 +83,7 @@ where
                 let resampler16 = resampler16_create(sample_header.sample_rate as f64, new_sample_rate, raw_sample_data.len() as i32, 2.0);
                 resampler16_getMaxOutLen(resampler16, raw_sample_data.len() as i32) as usize
             };
-            let (raw_sample_data, new_loop_bounds) = process_mono(
+            let (mut raw_sample_data, new_loop_bounds) = process_mono(
                 raw_sample_data.into(),
                 sample_header.sample_rate as f64,
                 new_sample_rate,
@@ -103,27 +101,19 @@ where
             let raw_sample_data_len_32 = (raw_sample_data.len() as f64 / 4.0).floor() as u32;
             sample_info.loopbeg = (new_loop_bounds[0] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32; // Set new loopbeg
             sample_info.looplen = (new_loop_bounds[1] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32 - sample_info.loopbeg; // Set new looplen
-            // sample_info.looplen = raw_sample_data_len_32 - sample_info.loopbeg;
             if dsp_options.ppmdu_mainbank {
                 if sample_info.loopbeg >= sample_info.looplen {
                     sample_info.loopbeg -= sample_info.looplen;
                 }
             }
-            let raw_sample_data_len = (sample_info.loopbeg as usize + sample_info.looplen as usize) * 4;
+            raw_sample_data.resize((sample_info.loopbeg as usize + sample_info.looplen as usize) * 4, 0);
 
-            // Sample length is defined by `loopbeg` and `looplen`, which are both indices based around 32bits. To avoid overlapping samples, calculate how much padding is needed to align the samples to 4 bytes here
-            // let alignment_padding_len = ((raw_sample_data_len - 1) | 3) + 1 - raw_sample_data_len;
-
+            // Write the sample
             let mut cursor = Cursor::new(&mut main_bank_swdl_pcmd.data);
-            cursor.seek(std::io::SeekFrom::End(0)).map_err(|_| DSEError::_InMemorySeekFailed())?;
-            for sample in raw_sample_data.into_iter().take(raw_sample_data_len) {
+            cursor.seek(std::io::SeekFrom::Start(pos_in_memory as u64 + first_sample_pos as u64)).map_err(|_| DSEError::_InMemorySeekFailed())?;
+            for sample in raw_sample_data.into_iter() {
                 cursor.write_u8(sample).map_err(|_| DSEError::_InMemoryWriteFailed())?;
             }
-
-            // Write in the padding
-            // for _ in 0..alignment_padding_len {
-            //     cursor.write_u8(0x00).map_err(|_| DSEError::_InMemoryWriteFailed())?; //Todo: might be better to use some other method of padding to avoid artifacts
-            // }
         } else {
             println!("{}SF2 file does not contain any sample data!", "Warning: ".yellow());
         }
