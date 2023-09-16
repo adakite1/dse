@@ -17,6 +17,7 @@ pub struct DSPOptions {
     pub ppmdu_mainbank: bool,
     pub resample_threshold: u32,
     pub sample_rate: f64,
+    pub sample_rate_relative: bool,
     pub adpcm_encoder_lookahead: i32
 }
 pub fn copy_raw_sample_data<R>(mut sf2file: R, sf2: &SoundFont2, bank: &mut SWDL, dsp_options: DSPOptions, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_samples: impl FnMut(usize, &SampleHeader) -> bool) -> Result<(HashMap<u16, u16>, BTreeMap<u16, SampleInfo>), DSEError>
@@ -75,10 +76,22 @@ where
 
             // Resample and encode to ADPCM
             let new_sample_rate = if sample_header.sample_rate > dsp_options.resample_threshold {
-                dsp_options.sample_rate
+                if dsp_options.sample_rate_relative {
+                    if dsp_options.sample_rate >= 1.0 {
+                        dsp_options.sample_rate * (sample_header.sample_rate as f64)
+                    } else {
+                        let mut accum = sample_header.sample_rate as f64;
+                        while accum > dsp_options.resample_threshold as f64 {
+                            accum *= dsp_options.sample_rate;
+                        }
+                        accum
+                    }
+                } else {
+                    dsp_options.sample_rate
+                }
             } else {
                 sample_header.sample_rate as f64
-            };
+            }.round(); // Rounding is required since the smplrate value in DSE is u32
             let preferred_samples_per_block = unsafe {
                 let resampler16 = resampler16_create(sample_header.sample_rate as f64, new_sample_rate, raw_sample_data.len() as i32, 2.0);
                 resampler16_getMaxOutLen(resampler16, raw_sample_data.len() as i32) as usize
