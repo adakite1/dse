@@ -285,11 +285,11 @@ impl TrkChunkWriter {
             println!("{}Overlapping notes detected! By default when there's note overlap a noteoff is sent immediately to avoid them.", "Warning: ".yellow());
             self.note_off(key)?;
         }
-        self.add_other_with_params_u8("SetTrackOctave", (key - 24) / 12 + 2)?; // AN EXTRA OCTAVE IS NOT LONGER ADDED BY DEFAULT SO THAT CUSTOM SOUND BANKS WORK CORRECTLY
+        self.add_other_with_params_u8("SetTrackOctave", key / 12)?; // AN EXTRA OCTAVE IS NOT LONGER ADDED BY DEFAULT SO THAT CUSTOM SOUND BANKS WORK CORRECTLY
         let mut evt = PlayNote::default();
         evt.velocity = vel;
         evt.octavemod = 2;
-        evt.note = (key - 24) % 12;
+        evt.note = key % 12;
         self.add(DSEEvent::PlayNote(evt));
         self.notes_held.insert(key, (self.trk.events.events.len() - 1, self.current_global_tick));
         if let Some(program_used) = self.programs_used.last_mut() {
