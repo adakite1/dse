@@ -119,7 +119,7 @@ where
                     new_sample_rate,
                     dsp_options.adpcm_encoder_lookahead,
                     None);
-                new_sample_rate = preserve_looping_result.1;
+                new_sample_rate = preserve_looping_result.1.ceil();
                 (preserve_looping_result.0, preserve_looping_result.2)
             } else {
                 process_mono(
