@@ -385,7 +385,7 @@ dependencies = [
 [[package]]
 name = "dse-dsp-sys"
 version = "0.1.1"
-source = "git+https://github.com/adakite1/dse-dsp-sys.git#f6e11a6f24deef65080623f4d0982d8a70067a24"
+source = "git+https://github.com/adakite1/dse-dsp-sys.git#127048ded1225630ba5e4e6e259341ccc5811f70"
 dependencies = [
  "adpcm-xq-sys",
  "cc",
