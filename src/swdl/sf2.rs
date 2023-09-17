@@ -92,16 +92,12 @@ where
             } else {
                 sample_header.sample_rate as f64
             }.round(); // Rounding is required since the smplrate value in DSE is u32
-            let preferred_samples_per_block = unsafe {
-                let resampler16 = resampler16_create(sample_header.sample_rate as f64, new_sample_rate, raw_sample_data.len() as i32, 2.0);
-                resampler16_getMaxOutLen(resampler16, raw_sample_data.len() as i32) as usize
-            };
             let (mut raw_sample_data, new_loop_bounds) = process_mono(
-                raw_sample_data.into(),
+                &raw_sample_data,
                 sample_header.sample_rate as f64,
                 new_sample_rate,
                 dsp_options.adpcm_encoder_lookahead,
-                ((preferred_samples_per_block - 2) | 7) + 2,
+                None,
                 &[
                     sample_info.loopbeg as usize * 2,
                     (sample_info.loopbeg + sample_info.looplen) as usize * 2
