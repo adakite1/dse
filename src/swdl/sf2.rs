@@ -7,7 +7,7 @@ use crate::math::{timecents_to_milliseconds, gain};
 use crate::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, ProgramInfo, SplitEntry, LFOEntry, PCMDChunk, Tuning};
 use crate::dtype::{DSEError, PointerTable};
 
-use dse_dsp_sys::{process_mono, resampler16_getMaxOutLen, resampler16_create};
+use dse_dsp_sys::{process_mono, process_mono_preserve_looping};
 use soundfont::data::{SampleHeader, GeneratorType};
 use soundfont::{SoundFont2, Zone, Preset};
 
@@ -56,6 +56,10 @@ where
         sample_info.smplloop = false; // SF2 does not loop samples by default.
         // smplrate is up above with ctune and ftune
         // smplpos is at the bottom
+        // WARNING FOR THE FUTURE:
+        //  If you are implementing direct 16-bit PCM sample import for some reason, this needs to be checked over.
+        // NOTE ABOUT THIS:
+        //  The loopbeg and looplen are overwritten if the sample is resampled and never used. It will only be read and used if the sample is not being resampled.
         if sample_header.loop_start >= sample_header.start &&
             sample_header.loop_end > sample_header.loop_start {
             sample_info.loopbeg = (sample_header.loop_start - sample_header.start) / 2;
@@ -75,7 +79,9 @@ where
             sf2file.read_i16_into::<LittleEndian>(&mut raw_sample_data).map_err(|_| DSEError::SampleReadError(sample_header.name.clone(), sample_pos_bytes, raw_sample_data.len()))?;
 
             // Resample and encode to ADPCM
+            let is_resampling;
             let new_sample_rate = if sample_header.sample_rate > dsp_options.resample_threshold {
+                is_resampling = true;
                 if dsp_options.sample_rate_relative {
                     if dsp_options.sample_rate >= 1.0 {
                         dsp_options.sample_rate * (sample_header.sample_rate as f64)
@@ -90,26 +96,55 @@ where
                     dsp_options.sample_rate
                 }
             } else {
+                is_resampling = false;
                 sample_header.sample_rate as f64
             }.round(); // Rounding is required since the smplrate value in DSE is u32
-            let (mut raw_sample_data, new_loop_bounds) = process_mono(
-                &raw_sample_data,
-                sample_header.sample_rate as f64,
-                new_sample_rate,
-                dsp_options.adpcm_encoder_lookahead,
-                None,
-                &[
-                    sample_info.loopbeg as usize * 2,
-                    (sample_info.loopbeg + sample_info.looplen) as usize * 2
-                ]);
+            let (mut raw_sample_data, new_loop_bounds) = if is_resampling {
+                let raw_sample_data_pre_loop;
+                let raw_sample_data_loop;
+                if sample_header.loop_start >= sample_header.start &&
+                    sample_header.loop_end > sample_header.loop_start {
+                    let loopbeg_in_sample_points = (sample_header.loop_start - sample_header.start) as usize;
+                    let loopend_in_sample_points = (sample_header.loop_end - sample_header.start) as usize;
+                    raw_sample_data_pre_loop = &raw_sample_data[..loopbeg_in_sample_points];
+                    raw_sample_data_loop = &raw_sample_data[loopbeg_in_sample_points..loopend_in_sample_points];
+                } else {
+                    raw_sample_data_pre_loop = &raw_sample_data[..0];
+                    raw_sample_data_loop = &raw_sample_data[..];
+                }
+                process_mono_preserve_looping(
+                    raw_sample_data_pre_loop,
+                    raw_sample_data_loop,
+                    sample_header.sample_rate as f64,
+                    new_sample_rate,
+                    dsp_options.adpcm_encoder_lookahead,
+                    None)
+            } else {
+                process_mono(
+                    &raw_sample_data,
+                    sample_header.sample_rate as f64,
+                    new_sample_rate,
+                    dsp_options.adpcm_encoder_lookahead,
+                    None,
+                    &[
+                        sample_info.loopbeg as usize * 2,
+                        (sample_info.loopbeg + sample_info.looplen) as usize * 2
+                    ])
+            };
             let new_loop_bounds = new_loop_bounds.unwrap();
             sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
             let mut tuning = sample_rate_adjustment(new_sample_rate, sample_rate_adjustment_curve, pitch_adjust)?;
             tuning.add_cents(sample_header.pitchadj as i64);
             sample_info.tuning = tuning;
-            let raw_sample_data_len_32 = (raw_sample_data.len() as f64 / 4.0).floor() as u32;
-            sample_info.loopbeg = (new_loop_bounds[0] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32; // Set new loopbeg
-            sample_info.looplen = (new_loop_bounds[1] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32 - sample_info.loopbeg; // Set new looplen
+            if is_resampling {
+                let raw_sample_data_len_32 = raw_sample_data.len() as u32 / 4;
+                sample_info.loopbeg = (new_loop_bounds[0] as u32 / 4).min(raw_sample_data_len_32); // Set new loopbeg
+                sample_info.looplen = raw_sample_data_len_32 - sample_info.loopbeg; // Set new looplen
+            } else {
+                let raw_sample_data_len_32 = (raw_sample_data.len() as f64 / 4.0).floor() as u32;
+                sample_info.loopbeg = (new_loop_bounds[0] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32; // Set new loopbeg
+                sample_info.looplen = (new_loop_bounds[1] as f64 / 4.0).floor().min(raw_sample_data_len_32 as f64) as u32 - sample_info.loopbeg; // Set new looplen
+            }
             if dsp_options.ppmdu_mainbank {
                 if sample_info.loopbeg >= sample_info.looplen {
                     sample_info.loopbeg -= sample_info.looplen;
