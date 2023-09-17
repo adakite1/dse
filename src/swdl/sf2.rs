@@ -80,7 +80,7 @@ where
 
             // Resample and encode to ADPCM
             let is_resampling;
-            let mut new_sample_rate = if sample_header.sample_rate > dsp_options.resample_threshold {
+            let new_sample_rate = if sample_header.sample_rate > dsp_options.resample_threshold {
                 is_resampling = true;
                 if dsp_options.sample_rate_relative {
                     if dsp_options.sample_rate >= 1.0 {
@@ -112,15 +112,13 @@ where
                     raw_sample_data_pre_loop = &raw_sample_data[..0];
                     raw_sample_data_loop = &raw_sample_data[..];
                 }
-                let preserve_looping_result = process_mono_preserve_looping(
+                process_mono_preserve_looping(
                     raw_sample_data_pre_loop,
                     raw_sample_data_loop,
                     sample_header.sample_rate as f64,
                     new_sample_rate,
                     dsp_options.adpcm_encoder_lookahead,
-                    None);
-                new_sample_rate = preserve_looping_result.1.ceil();
-                (preserve_looping_result.0, preserve_looping_result.2)
+                    None)
             } else {
                 process_mono(
                     &raw_sample_data,
