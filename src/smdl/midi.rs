@@ -203,8 +203,10 @@ impl Hash for ProgramUsed {
     }
 }
 pub struct TrkChunkWriter {
+    trkid: u8,
+    chanid: u8,
     current_global_tick: u128,
-    trk: TrkChunk,
+    trk_events: Vec<(bool, DSEEvent)>,
     notes_held: HashMap<u8, (usize, u128)>,
     bank: u8,
     program: u8,
@@ -214,10 +216,7 @@ pub struct TrkChunkWriter {
 }
 impl TrkChunkWriter {
     pub fn create(trkid: u8, chanid: u8, link_bytes: (u8, u8), default_program: Option<u8>) -> Result<TrkChunkWriter, DSEError> {
-        let mut trk = TrkChunk::default();
-        trk.preamble.trkid = trkid;
-        trk.preamble.chanid = chanid;
-        let mut trk_chunk_writer = TrkChunkWriter { current_global_tick: 0, trk, notes_held: HashMap::new(), bank: 0, program: 0, programs_used: Vec::new(), last_program_change_global_tick: None, last_program_change_event_index: None };
+        let mut trk_chunk_writer = TrkChunkWriter { trkid, chanid, current_global_tick: 0, trk_events: Vec::new(), notes_held: HashMap::new(), bank: 0, program: 0, programs_used: Vec::new(), last_program_change_global_tick: None, last_program_change_event_index: None };
 
         // Fill in some standard events
         trk_chunk_writer.add_other_with_params_u8("SetTrackExpression", 100)?; // Random value for now
@@ -244,7 +243,9 @@ impl TrkChunkWriter {
                 self.programs_used.pop();
                 same_tick = true;
                 if let Some(last_program_change_event_index) = self.last_program_change_event_index {
-                    self.trk.events.events.remove(last_program_change_event_index);
+                    if let Some(last_program_change_event) = self.trk_events.get_mut(last_program_change_event_index) {
+                        last_program_change_event.0 = false;
+                    }
                 }
             }
         }
@@ -266,7 +267,9 @@ impl TrkChunkWriter {
                 self.programs_used.pop();
                 same_tick = true;
                 if let Some(last_program_change_event_index) = self.last_program_change_event_index {
-                    self.trk.events.events.remove(last_program_change_event_index);
+                    if let Some(last_program_change_event) = self.trk_events.get_mut(last_program_change_event_index) {
+                        last_program_change_event.0 = false;
+                    }
                 }
             }
         }
@@ -290,8 +293,8 @@ impl TrkChunkWriter {
         evt.velocity = vel;
         evt.octavemod = 2;
         evt.note = key % 12;
-        self.add(DSEEvent::PlayNote(evt));
-        self.notes_held.insert(key, (self.trk.events.events.len() - 1, self.current_global_tick));
+        let note_on_evt_index = self.add(DSEEvent::PlayNote(evt));
+        self.notes_held.insert(key, (note_on_evt_index, self.current_global_tick));
         if let Some(program_used) = self.programs_used.last_mut() {
             program_used.notes.insert(key);
         }
@@ -304,7 +307,7 @@ impl TrkChunkWriter {
         let (index, past_global_tick) = self.notes_held.remove(&key).ok_or(DSEError::_ValidHashMapKeyRemovalFailed())?;
         if let Ok(delta) = u32::try_from(self.current_global_tick - past_global_tick) {
             if let Some(delta) = u24::try_from(delta) {
-                if let DSEEvent::PlayNote(evt) = &mut self.trk.events.events[index] {
+                if let Some((_, DSEEvent::PlayNote(evt))) = self.trk_events.get_mut(index) {
                     evt.keydownduration = delta.as_int();
                 } else {
                     return Err(DSEError::_CorrespondingNoteOnNotFound())
@@ -322,8 +325,10 @@ impl TrkChunkWriter {
         evt.code = Other::name_to_code(name)?;
         Ok(self.add_other_event(evt))
     }
-    pub fn pop(&mut self) -> Option<DSEEvent> {
-        self.trk.events.events.pop()
+    pub fn pop_virtual(&mut self) {
+        if let Some(e) = self.trk_events.last_mut() {
+            e.0 = false;
+        }
     }
     pub fn add_other_with_params_u8(&mut self, name: &str, val: u8) -> Result<usize, DSEError> {
         let mut evt = Other::default();
@@ -338,8 +343,8 @@ impl TrkChunkWriter {
         self.add_other_with_params_u8("SetBank", unk1)
     }
     pub fn add(&mut self, event: DSEEvent) -> usize {
-        let new_event_index = self.trk.events.events.len();
-        self.trk.events.events.push(event);
+        let new_event_index = self.trk_events.len();
+        self.trk_events.push((true, event));
         new_event_index
     }
     pub fn add_playnote_event(&mut self, playnote: PlayNote) -> usize {
@@ -395,7 +400,16 @@ impl TrkChunkWriter {
         let mut eot_event = Other::default();
         eot_event.code = Other::name_to_code("EndOfTrack").unwrap();
         self.add_other_event(eot_event);
-        self.trk
+        
+        let mut trk = TrkChunk::default();
+        trk.preamble.trkid = self.trkid;
+        trk.preamble.chanid = self.chanid;
+        trk.events.events = self.trk_events.into_iter().filter_map(|(enabled, evt)| if enabled {
+            Some(evt)
+        } else {
+            None
+        }).collect();
+        trk
     }
 }
 
