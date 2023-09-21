@@ -117,7 +117,7 @@ where
                     raw_sample_data_loop,
                     sample_header.sample_rate as f64,
                     new_sample_rate,
-                    dsp_options.adpcm_encoder_lookahead,
+                    dsp_options.adpcm_encoder_lookahead, 128, 32.0,
                     None)
             } else {
                 process_mono(
