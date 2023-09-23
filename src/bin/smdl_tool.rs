@@ -127,11 +127,11 @@ fn main() -> Result<(), DSEError> {
                     let flags = SongBuilderFlags::parse_from_swdl_file(&mut File::open(swdl_path.clone())?)?;
 
                     swdl = Some(SWDL::default());
-                    if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                    if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
                         swdl.as_mut().unwrap().read_from_file::<u32, u32, _>(&mut File::open(swdl_path)?)?;
-                    } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                    } else if flags.contains(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
                         swdl.as_mut().unwrap().read_from_file::<u32, u16, _>(&mut File::open(swdl_path)?)?;
-                    } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                    } else if flags.contains(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
                         swdl.as_mut().unwrap().read_from_file::<u16, u32, _>(&mut File::open(swdl_path)?)?;
                     } else {
                         swdl.as_mut().unwrap().read_from_file::<u16, u16, _>(&mut File::open(swdl_path)?)?;
@@ -141,11 +141,11 @@ fn main() -> Result<(), DSEError> {
                     swdl = Some(quick_xml::de::from_str::<SWDL>(&st)?);
                     let flags = SongBuilderFlags::parse_from_swdl(swdl.as_ref().unwrap());
 
-                    if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                    if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
                         swdl.as_mut().unwrap().regenerate_read_markers::<u32, u32>()?;
-                    } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                    } else if flags.contains(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
                         swdl.as_mut().unwrap().regenerate_read_markers::<u32, u16>()?;
-                    } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                    } else if flags.contains(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
                         swdl.as_mut().unwrap().regenerate_read_markers::<u16, u32>()?;
                     } else {
                         swdl.as_mut().unwrap().regenerate_read_markers::<u16, u16>()?;
@@ -241,15 +241,15 @@ fn main() -> Result<(), DSEError> {
 
                         let flags = SongBuilderFlags::parse_from_swdl(&track_swdl);
 
-                        if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                        if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
                             track_swdl.regenerate_read_markers::<u32, u32>()?;
                             track_swdl.regenerate_automatic_parameters()?;
                             track_swdl.write_to_file::<u32, u32, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
-                        } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                        } else if flags.contains(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
                             track_swdl.regenerate_read_markers::<u32, u16>()?;
                             track_swdl.regenerate_automatic_parameters()?;
                             track_swdl.write_to_file::<u32, u16, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
-                        } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                        } else if flags.contains(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
                             track_swdl.regenerate_read_markers::<u16, u32>()?;
                             track_swdl.regenerate_automatic_parameters()?;
                             track_swdl.write_to_file::<u16, u32, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
