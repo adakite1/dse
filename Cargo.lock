@@ -207,6 +207,9 @@ name = "bitflags"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4682ae6287fcf752ecaabbfcc7b6f9b72aa33933dc23a554d853aea8eea8635"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bumpalo"
@@ -357,6 +360,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "bevy_reflect",
+ "bitflags 2.4.0",
  "byteorder",
  "chrono",
  "clap",
@@ -364,6 +368,7 @@ dependencies = [
  "dse-dsp-sys",
  "glob",
  "midly",
+ "num-traits",
  "phf",
  "quick-xml",
  "serde",

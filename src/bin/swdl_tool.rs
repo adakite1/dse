@@ -8,9 +8,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, command, Subcommand};
-use dse::swdl::sf2::{copy_raw_sample_data, copy_presets, DSPOptions};
+use dse::swdl::sf2::{copy_raw_sample_data, copy_presets, DSPOptions, SongBuilderFlags};
 use dse::swdl::{SWDL, PRGIChunk, KGRPChunk, Keygroup, create_swdl_shell};
-use dse::dtype::{ReadWrite, DSEError};
+use dse::dtype::DSEError;
 
 #[path = "../fileutils.rs"]
 mod fileutils;
@@ -106,19 +106,49 @@ fn main() -> Result<(), DSEError> {
             for (input_file_path, output_file_path) in input_file_paths {
                 print!("Converting {}... ", input_file_path.display());
                 if source_file_format == "swd" {
+                    let flags = SongBuilderFlags::parse_from_swdl_file(&mut File::open(input_file_path.clone())?)?;
+
                     let mut raw = File::open(input_file_path)?;
                     let mut swdl = SWDL::default();
-                    swdl.read_from_file(&mut raw)?;
+                    if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                        swdl.read_from_file::<u32, u32, _>(&mut raw)?;
+                    } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                        swdl.read_from_file::<u32, u16, _>(&mut raw)?;
+                    } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                        swdl.read_from_file::<u16, u32, _>(&mut raw)?;
+                    } else {
+                        swdl.read_from_file::<u16, u16, _>(&mut raw)?;
+                    }
 
                     let st = quick_xml::se::to_string(&swdl)?;
                     open_file_overwrite_rw(output_file_path)?.write_all(st.as_bytes())?;
                 } else if source_file_format == "xml" {
                     let st = std::fs::read_to_string(input_file_path)?;
                     let mut swdl_recreated = quick_xml::de::from_str::<SWDL>(&st)?;
-                    swdl_recreated.regenerate_read_markers()?;
-                    swdl_recreated.regenerate_automatic_parameters()?;
 
-                    swdl_recreated.write_to_file(&mut open_file_overwrite_rw(output_file_path)?)?;
+                    let flags = SongBuilderFlags::parse_from_swdl(&swdl_recreated);
+
+                    if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                        swdl_recreated.regenerate_read_markers::<u32, u32>()?;
+                        swdl_recreated.regenerate_automatic_parameters()?;
+                        
+                        swdl_recreated.write_to_file::<u32, u32, _>(&mut open_file_overwrite_rw(output_file_path)?)?;
+                    } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                        swdl_recreated.regenerate_read_markers::<u32, u16>()?;
+                        swdl_recreated.regenerate_automatic_parameters()?;
+
+                        swdl_recreated.write_to_file::<u32, u16, _>(&mut open_file_overwrite_rw(output_file_path)?)?;
+                    } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                        swdl_recreated.regenerate_read_markers::<u16, u32>()?;
+                        swdl_recreated.regenerate_automatic_parameters()?;
+
+                        swdl_recreated.write_to_file::<u16, u32, _>(&mut open_file_overwrite_rw(output_file_path)?)?;
+                    } else {
+                        swdl_recreated.regenerate_read_markers::<u16, u16>()?;
+                        swdl_recreated.regenerate_automatic_parameters()?;
+
+                        swdl_recreated.write_to_file::<u16, u16, _>(&mut open_file_overwrite_rw(output_file_path)?)?;
+                    }
                 } else {
                     panic!("Whaaat?");
                 }
@@ -133,13 +163,34 @@ fn main() -> Result<(), DSEError> {
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
             
             let mut main_bank_swdl;
+            let main_bank_flags;
             if valid_file_of_type(swdl_path, "swd") {
+                main_bank_flags = SongBuilderFlags::parse_from_swdl_file(&mut File::open(swdl_path)?)?;
+                
                 main_bank_swdl = SWDL::default();
-                main_bank_swdl.read_from_file(&mut File::open(swdl_path)?)?;
+                if main_bank_flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                    main_bank_swdl.read_from_file::<u32, u32, _>(&mut File::open(swdl_path)?)?;
+                } else if main_bank_flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                    main_bank_swdl.read_from_file::<u32, u16, _>(&mut File::open(swdl_path)?)?;
+                } else if main_bank_flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                    main_bank_swdl.read_from_file::<u16, u32, _>(&mut File::open(swdl_path)?)?;
+                } else {
+                    main_bank_swdl.read_from_file::<u16, u16, _>(&mut File::open(swdl_path)?)?;
+                }
             } else if valid_file_of_type(swdl_path, "xml") {
                 let st = std::fs::read_to_string(swdl_path)?;
                 main_bank_swdl = quick_xml::de::from_str::<SWDL>(&st)?;
-                main_bank_swdl.regenerate_read_markers()?;
+                main_bank_flags = SongBuilderFlags::parse_from_swdl(&main_bank_swdl);
+                
+                if main_bank_flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                    main_bank_swdl.regenerate_read_markers::<u32, u32>()?;
+                } else if main_bank_flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                    main_bank_swdl.regenerate_read_markers::<u32, u16>()?;
+                } else if main_bank_flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                    main_bank_swdl.regenerate_read_markers::<u16, u32>()?;
+                } else {
+                    main_bank_swdl.regenerate_read_markers::<u16, u16>()?;
+                }
                 main_bank_swdl.regenerate_automatic_parameters()?;
             } else {
                 return Err(DSEError::Invalid("Provided Main Bank SWD file is not an SWD file!".to_string()));
@@ -186,17 +237,32 @@ fn main() -> Result<(), DSEError> {
                 track_swdl.kgrp = Some(track_swdl_kgrp);
 
                 // Write the track swdl file into the specified output directory
-                track_swdl.regenerate_read_markers()?;
+                track_swdl.regenerate_read_markers::<u16, u16>()?;
                 track_swdl.regenerate_automatic_parameters()?;
-                track_swdl.write_to_file(&mut open_file_overwrite_rw(output_file_path)?)?;
+                track_swdl.write_to_file::<u16, u16, _>(&mut open_file_overwrite_rw(output_file_path)?)?;
 
                 println!("done!");
             }
 
             let out_swdl_path = out_swdl_path.clone().unwrap_or(std::env::current_dir()?.join("bgm.patched.swd"));
-            main_bank_swdl.regenerate_read_markers()?;
-            main_bank_swdl.regenerate_automatic_parameters()?;
-            main_bank_swdl.write_to_file(&mut open_file_overwrite_rw(out_swdl_path)?)?;
+
+            if main_bank_flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                main_bank_swdl.regenerate_read_markers::<u32, u32>()?;
+                main_bank_swdl.regenerate_automatic_parameters()?;
+                main_bank_swdl.write_to_file::<u32, u32, _>(&mut open_file_overwrite_rw(out_swdl_path)?)?;
+            } else if main_bank_flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                main_bank_swdl.regenerate_read_markers::<u32, u16>()?;
+                main_bank_swdl.regenerate_automatic_parameters()?;
+                main_bank_swdl.write_to_file::<u32, u16, _>(&mut open_file_overwrite_rw(out_swdl_path)?)?;
+            } else if main_bank_flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                main_bank_swdl.regenerate_read_markers::<u16, u32>()?;
+                main_bank_swdl.regenerate_automatic_parameters()?;
+                main_bank_swdl.write_to_file::<u16, u32, _>(&mut open_file_overwrite_rw(out_swdl_path)?)?;
+            } else {
+                main_bank_swdl.regenerate_read_markers::<u16, u16>()?;
+                main_bank_swdl.regenerate_automatic_parameters()?;
+                main_bank_swdl.write_to_file::<u16, u16, _>(&mut open_file_overwrite_rw(out_swdl_path)?)?;
+            }
         },
     }
 

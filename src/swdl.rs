@@ -81,8 +81,8 @@ pub struct SWDLHeader {
     pub magicn: u32,
     /// Note: 4-bytes represented as one u32
     #[serde(default)]
-    #[serde(skip_serializing)]
-    pub unk18: u32, // Always zeroes
+    #[serde(rename = "@unk18")]
+    pub unk18: u32, // Always zeroes (hijacked for flags)
     #[serde(default)]
     #[serde(skip_serializing)]
     pub flen: u32,
@@ -854,17 +854,17 @@ impl WAVIChunk {
         self._read_n = nbwavislots;
     }
 }
-impl ReadWrite for WAVIChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer).map_err(|e| match e {
+impl WAVIChunk {
+    pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file::<P, _>(writer).map_err(|e| match e {
             DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlWavi),
             _ => e
         })?)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+    pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.data.set_read_params(self._read_n, self.header.chunklen);
-        self.data.read_from_file(reader)?;
+        self.data.read_from_file::<P, _>(reader)?;
         Ok(())
     }
 }
@@ -891,17 +891,17 @@ impl PRGIChunk {
         self._read_n = nbprgislots;
     }
 }
-impl ReadWrite for PRGIChunk {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file(writer).map_err(|e| match e {
+impl PRGIChunk {
+    pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+        Ok(self.header.write_to_file(writer)? + self.data.write_to_file::<P, _>(writer).map_err(|e| match e {
             DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlPrgi),
             _ => e
         })?)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+    pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         self.data.set_read_params(self._read_n, self.header.chunklen);
-        self.data.read_from_file(reader)?;
+        self.data.read_from_file::<P, _>(reader)?;
         Ok(())
     }
 }
@@ -1045,9 +1045,9 @@ impl SWDL {
         eod
     }
     /// Regenerate length, slots, and nb parameters. To keep this working, `write_to_file` should never attempt to read or seek beyond alotted frame, which is initial cursor position and beyond.
-    pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
+    pub fn regenerate_read_markers<PWavi: Pointer<LittleEndian>, PPrgi: Pointer<LittleEndian>>(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
-        self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))?.try_into().map_err(|_| DSEError::BinaryFileTooLarge(DSEFileType::SWDL))?;
+        self.header.flen = self.write_to_file::<PWavi, PPrgi, _>(&mut Cursor::new(&mut Vec::new()))?.try_into().map_err(|_| DSEError::BinaryFileTooLarge(DSEFileType::SWDL))?;
         println!("flen {}", self.header.flen);
         if self.header.pcmdlen & 0xFFFF0000 == 0xAAAA0000 && self.pcmd.is_none() {
             // Expected case of separation with main bank. Noop
@@ -1060,13 +1060,13 @@ impl SWDL {
         }
         self.header.nbwavislots = self.wavi.data.slots().try_into().map_err(|_| DSEError::PointerTableTooLong(DSEBlockType::SwdlWavi))?;
         self.header.nbprgislots = self.prgi.as_ref().map(|prgi| prgi.data.slots().try_into().map_err(|_| DSEError::PointerTableTooLong(DSEBlockType::SwdlPrgi))).unwrap_or(Ok(128))?; // In the main bank, this is set to 128 even though there is no prgi chunk
-        self.header.wavilen = self.wavi.data.write_to_file(&mut Cursor::new(&mut Vec::new())).map_err(|e| match e {
+        self.header.wavilen = self.wavi.data.write_to_file::<PWavi, _>(&mut Cursor::new(&mut Vec::new())).map_err(|e| match e {
             DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlWavi),
             _ => e
         })?.try_into().map_err(|_| DSEError::BinaryBlockTooLarge(DSEFileType::SWDL, DSEBlockType::SwdlWavi))?;
         self.wavi.header.chunklen = self.header.wavilen;
         if let Some(prgi) = &mut self.prgi {
-            prgi.header.chunklen = prgi.data.write_to_file(&mut Cursor::new(&mut Vec::new())).map_err(|e| match e {
+            prgi.header.chunklen = prgi.data.write_to_file::<PPrgi, _>(&mut Cursor::new(&mut Vec::new())).map_err(|e| match e {
                 DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlPrgi),
                 _ => e
             })?.try_into().map_err(|_| DSEError::BinaryBlockTooLarge(DSEFileType::SWDL, DSEBlockType::SwdlPrgi))?;
@@ -1131,25 +1131,25 @@ impl Default for SWDL {
         }
     }
 }
-impl ReadWrite for SWDL {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+impl SWDL {
+    pub fn write_to_file<PWavi: Pointer<LittleEndian>, PPrgi: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let mut bytes_written = self.header.write_to_file(writer)?;
-        bytes_written += self.wavi.write_to_file(writer)?;
-        bytes_written += if let Some(prgi) = &self.prgi { prgi.write_to_file(writer)? } else { 0 };
+        bytes_written += self.wavi.write_to_file::<PWavi, _>(writer)?;
+        bytes_written += if let Some(prgi) = &self.prgi { prgi.write_to_file::<PPrgi, _>(writer)? } else { 0 };
         bytes_written += if let Some(kgrp) = &self.kgrp { kgrp.write_to_file(writer)? } else { 0 };
         bytes_written += if let Some(pcmd) = &self.pcmd { pcmd.write_to_file(writer)? } else { 0 };
         bytes_written += SWDL::generate_eod_chunk_header().write_to_file(writer)?;
         Ok(bytes_written)
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+    pub fn read_from_file<PWavi: Pointer<LittleEndian>, PPrgi: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
         // WAVI
         self.wavi.set_read_params(self.header.nbwavislots as usize);
-        self.wavi.read_from_file(reader)?;
+        self.wavi.read_from_file::<PWavi, _>(reader)?;
         // PRGI {0x70, 0x72, 0x67, 0x69}
         if peek_magic!(reader)? == [0x70, 0x72, 0x67, 0x69] {
             let mut tmp = PRGIChunk::new(self.header.nbprgislots as usize);
-            tmp.read_from_file(reader)?;
+            tmp.read_from_file::<PPrgi, _>(reader)?;
             self.prgi = Some(tmp);
         }
         // KGRP {0x6B, 0x67, 0x72, 0x70}

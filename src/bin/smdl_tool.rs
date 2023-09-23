@@ -11,6 +11,7 @@ use colored::Colorize;
 use dse::smdl::midi::{open_midi, get_midi_tpb, get_midi_messages_flattened, TrkChunkWriter, copy_midi_messages};
 use dse::smdl::create_smdl_shell;
 use dse::swdl::ProgramInfo;
+use dse::swdl::sf2::SongBuilderFlags;
 use dse::{smdl::SMDL, swdl::SWDL};
 use dse::dtype::{ReadWrite, DSEError, DSELinkBytes};
 
@@ -123,12 +124,33 @@ fn main() -> Result<(), DSEError> {
             let mut swdl = None;
             if let Some(swdl_path) = swdl_path {
                 if valid_file_of_type(swdl_path, "swd") {
+                    let flags = SongBuilderFlags::parse_from_swdl_file(&mut File::open(swdl_path.clone())?)?;
+
                     swdl = Some(SWDL::default());
-                    swdl.as_mut().unwrap().read_from_file(&mut File::open(swdl_path)?)?;
+                    if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                        swdl.as_mut().unwrap().read_from_file::<u32, u32, _>(&mut File::open(swdl_path)?)?;
+                    } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                        swdl.as_mut().unwrap().read_from_file::<u32, u16, _>(&mut File::open(swdl_path)?)?;
+                    } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                        swdl.as_mut().unwrap().read_from_file::<u16, u32, _>(&mut File::open(swdl_path)?)?;
+                    } else {
+                        swdl.as_mut().unwrap().read_from_file::<u16, u16, _>(&mut File::open(swdl_path)?)?;
+                    }
                 } else if valid_file_of_type(swdl_path, "xml") {
                     let st = std::fs::read_to_string(swdl_path)?;
                     swdl = Some(quick_xml::de::from_str::<SWDL>(&st)?);
-                    swdl.as_mut().unwrap().regenerate_read_markers()?;
+                    let flags = SongBuilderFlags::parse_from_swdl(swdl.as_ref().unwrap());
+
+                    if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                        swdl.as_mut().unwrap().regenerate_read_markers::<u32, u32>()?;
+                    } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                        swdl.as_mut().unwrap().regenerate_read_markers::<u32, u16>()?;
+                    } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                        swdl.as_mut().unwrap().regenerate_read_markers::<u16, u32>()?;
+                    } else {
+                        swdl.as_mut().unwrap().regenerate_read_markers::<u16, u16>()?;
+                    }
+
                     swdl.as_mut().unwrap().regenerate_automatic_parameters()?;
                 } else {
                     return Err(DSEError::Invalid("Provided SWD file is not an SWD file!".to_string()));
@@ -216,9 +238,26 @@ fn main() -> Result<(), DSEError> {
                         }
                         wavi_objects.retain(|obj| votes.contains_key(&obj.id));
                         println!("\n{}", "Generating optimized SWDL file...".green());
-                        track_swdl.regenerate_read_markers()?;
-                        track_swdl.regenerate_automatic_parameters()?;
-                        track_swdl.write_to_file(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+
+                        let flags = SongBuilderFlags::parse_from_swdl(&track_swdl);
+
+                        if flags.intersects(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+                            track_swdl.regenerate_read_markers::<u32, u32>()?;
+                            track_swdl.regenerate_automatic_parameters()?;
+                            track_swdl.write_to_file::<u32, u32, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+                        } else if flags.intersects(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+                            track_swdl.regenerate_read_markers::<u32, u16>()?;
+                            track_swdl.regenerate_automatic_parameters()?;
+                            track_swdl.write_to_file::<u32, u16, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+                        } else if flags.intersects(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+                            track_swdl.regenerate_read_markers::<u16, u32>()?;
+                            track_swdl.regenerate_automatic_parameters()?;
+                            track_swdl.write_to_file::<u16, u32, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+                        } else {
+                            track_swdl.regenerate_read_markers::<u16, u16>()?;
+                            track_swdl.regenerate_automatic_parameters()?;
+                            track_swdl.write_to_file::<u16, u16, _>(&mut open_file_overwrite_rw(output_file_path_swd)?)?;
+                        }
                     } else {
                         println!("{}Failed to generate an optimized track-specific SWDL bank! Source SWDL bank unspecified!! Skipped.", "Error: ".red());
                     }

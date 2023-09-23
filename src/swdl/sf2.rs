@@ -3,15 +3,52 @@ use std::io::{Seek, Cursor, Read};
 
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
 use colored::Colorize;
+use serde::{Serialize, Deserialize};
 use crate::math::{timecents_to_milliseconds, gain};
 use crate::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, ProgramInfo, SplitEntry, LFOEntry, PCMDChunk, Tuning};
-use crate::dtype::{DSEError, PointerTable};
+use crate::dtype::{DSEError, PointerTable, ReadWrite};
 
-use dse_dsp_sys::{process_mono, process_mono_preserve_looping, SampleRateChoicePreference};
+use dse_dsp_sys::{process_mono_preserve_looping, SampleRateChoicePreference};
 use soundfont::data::{SampleHeader, GeneratorType};
 use soundfont::{SoundFont2, Zone, Preset};
 
-use super::{BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE, lookup_env_time_value_i16, lookup_env_time_value_i32};
+use super::{BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE, lookup_env_time_value_i16, lookup_env_time_value_i32, SWDLHeader};
+
+use bitflags::bitflags;
+
+bitflags! {
+    /// Although unused within this crate, these bitflags are provided as a standard way to utilize the `unk18` value within the SWDL header.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    pub struct SongBuilderFlags: u32 {
+        /// The WAVI chunk's pointers are extended to use 32-bit unsigned integers.
+        const WAVI_POINTER_EXTENSION = 0b00000001;
+        ///UNUSED!!!
+        const PRGI_POINTER_EXTENSION = 0b00000010;
+        ///UNUSED!!!
+        const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
+    }
+}
+//UNUSED BUT KEPT
+// impl ReadWrite for SongBuilderFlags {
+//     fn write_to_file<W: Read + std::io::Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+//         writer.write_u32::<LittleEndian>(self.bits())?;
+//         Ok(4)
+//     }
+//     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+//         *self = Self::from_bits_retain(reader.read_u32::<LittleEndian>()?);
+//         Ok(())
+//     }
+// }
+impl SongBuilderFlags {
+    pub fn parse_from_swdl_file<R: Read + Seek>(reader: &mut R) -> Result<SongBuilderFlags, DSEError> {
+        let mut swdl_header = SWDLHeader::default();
+        swdl_header.read_from_file(reader)?;
+        Ok(Self::from_bits_retain(swdl_header.unk18))
+    }
+    pub fn parse_from_swdl(swdl: &SWDL) -> SongBuilderFlags {
+        Self::from_bits_retain(swdl.header.unk18)
+    }
+}
 
 pub struct DSPOptions {
     pub ppmdu_mainbank: bool,

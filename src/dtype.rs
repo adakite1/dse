@@ -1,7 +1,8 @@
 use core::panic;
-use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec};
 use bevy_reflect::{Reflect, Struct};
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
+use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive};
 use serde::{Serialize, Deserialize};
 
 use crate::swdl::{ADSRVolumeEnvelope, DSEString, Tuning};
@@ -451,9 +452,44 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         }
     }
 }
-impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTable<T> {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        let pointer_table_byte_len = self.slots() * 2;
+pub trait Pointer<O: ByteOrder>: Unsigned + AsPrimitive<u64> + TryFrom<usize> + FromBytes + ToBytes + PrimInt + Eq + Zero {
+    fn read_from_bytes(buf: &[u8]) -> Self;
+    fn read<R: Read>(reader: &mut R) -> Result<Self, std::io::Error>;
+    fn write_as_bytes(self, buf: &mut [u8]);
+    fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error>;
+}
+impl<O: ByteOrder> Pointer<O> for u16 {
+    fn read_from_bytes(buf: &[u8]) -> u16 {
+        O::read_u16(buf)
+    }
+    fn read<R: Read>(reader: &mut R) -> Result<u16, std::io::Error> {
+        reader.read_u16::<O>()
+    }
+    fn write_as_bytes(self, buf: &mut [u8]) {
+        O::write_u16(buf, self)
+    }
+    fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error> {
+        writer.write_u16::<O>(self)
+    }
+}
+impl<O: ByteOrder> Pointer<O> for u32 {
+    fn read_from_bytes(buf: &[u8]) -> u32 {
+        O::read_u32(buf)
+    }
+    fn read<R: Read>(reader: &mut R) -> Result<u32, std::io::Error> {
+        reader.read_u32::<O>()
+    }
+    fn write_as_bytes(self, buf: &mut [u8]) {
+        O::write_u32(buf, self)
+    }
+    fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error> {
+        writer.write_u32::<O>(self)
+    }
+}
+impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
+    pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+        let bytes_per_pointer = std::mem::size_of::<P>();
+        let pointer_table_byte_len = self.slots() * bytes_per_pointer;
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
         let first_pointer = pointer_table_byte_len_aligned;
         let mut accumulated_write = 0;
@@ -463,12 +499,13 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTa
         writer.write_all(&vec![0; pointer_table_byte_len as usize])?;
         for (i, val) in self.objects.iter().enumerate() {
             let i = val.is_self_indexed().unwrap_or(i);
-            writer.seek(SeekFrom::Start(pointer_table_start + i as u64 * 2))?;
-            if writer.read_u16::<LittleEndian>()? == 0 {
+            writer.seek(SeekFrom::Start(pointer_table_start + i as u64 * bytes_per_pointer as u64))?;
+            if P::read(writer)? == P::zero() {
                 // Pointer has not been written in yet
-                writer.seek(SeekFrom::Current(-2))?;
+                writer.seek(SeekFrom::Current(-(bytes_per_pointer as i64)))?;
                 println!("{} pointer", first_pointer + accumulated_write);
-                writer.write_u16::<LittleEndian>((first_pointer + accumulated_write).try_into().map_err(|_| DSEError::Placeholder())?)?;
+                let p: P = (first_pointer + accumulated_write).try_into().map_err(|_| DSEError::Placeholder())?;
+                p.write(writer)?;
             } else {
                 // Overlapping pointers!
                 return Err(DSEError::PointerTableDuplicateSelfIndex())
@@ -484,12 +521,13 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTa
         println!("==============================");
         Ok(pointer_table_byte_len_aligned + accumulated_object_data.len())
     }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+    pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+        let bytes_per_pointer = std::mem::size_of::<P>();
         let start_of_pointer_table = reader.seek(SeekFrom::Current(0))?;
         for i in 0..self._read_n {
-            let twobyte_offset_from_start_of_pointer_table = reader.read_u16::<LittleEndian>()?;
-            if twobyte_offset_from_start_of_pointer_table != 0 {
-                reader.seek(SeekFrom::Start(start_of_pointer_table + twobyte_offset_from_start_of_pointer_table as u64))?;
+            let nbyte_offset_from_start_of_pointer_table = P::read(reader)?;
+            if nbyte_offset_from_start_of_pointer_table != P::zero() {
+                reader.seek(SeekFrom::Start(start_of_pointer_table + nbyte_offset_from_start_of_pointer_table.as_()))?;
                 let mut object = T::default();
                 object.read_from_file(reader)?;
                 reader.seek(SeekFrom::Start(start_of_pointer_table + (i as u64 + 1) * 2))?;
@@ -500,6 +538,14 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTa
         Ok(())
     }
 }
+// impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for PointerTable<T> {
+//     fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+//         self.write_to_file::<u16, _>(writer)
+//     }
+//     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+//         self.read_from_file::<u16, _>(reader)
+//     }
+// }
 
 /// Trait defining the getters and setters for the DSE link bytes
 pub trait DSELinkBytes {
