@@ -1,5 +1,5 @@
 use core::panic;
-use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, any::TypeId};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
 use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive};
@@ -414,48 +414,6 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> ReadWrite for Table<T> 
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PointerSizeMagic<P: Pointer<LittleEndian>> {
-    #[serde(default)]
-    #[serde(skip_serializing)]
-    magic: Option<P>
-}
-impl<P: Pointer<LittleEndian>> PointerSizeMagic<P> {
-    pub fn new() -> PointerSizeMagic<P> {
-        if TypeId::of::<P>() == TypeId::of::<u16>() {
-            PointerSizeMagic { magic: None }
-        } else {
-            PointerSizeMagic { magic: Some(P::max_value()) }
-        }
-    }
-}
-impl<P: Pointer<LittleEndian>> Default for PointerSizeMagic<P> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<P: Pointer<LittleEndian>> ReadWrite for PointerSizeMagic<P> {
-    fn write_to_file<W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        if let Some(magic) = &self.magic {
-            magic.write(writer)?;
-            Ok(std::mem::size_of::<P>())
-        } else {
-            Ok(0)
-        }
-    }
-    fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
-        if TypeId::of::<P>() == TypeId::of::<u16>() {
-            *self = PointerSizeMagic {
-                magic: None
-            };
-        } else {
-            *self = PointerSizeMagic {
-                magic: Some(P::read(reader)?)
-            };
-        }
-        Ok(())
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PointerTable<T: ReadWrite + Default + IsSelfIndexed + Serialize> {
     /// ONLY USE AS THE NUMBER OF OBJECTS TO READ!!! USE objects.len() INSTEAD OUTSIDE OF read_from_file!!!
