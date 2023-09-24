@@ -856,13 +856,14 @@ impl WAVIChunk {
 }
 impl WAVIChunk {
     pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file::<P, _>(writer).map_err(|e| match e {
+        Ok(self.header.write_to_file(writer)? + PointerSizeMagic::<P>::default().write_to_file(writer)? + self.data.write_to_file::<P, _>(writer).map_err(|e| match e {
             DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlWavi),
             _ => e
         })?)
     }
     pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
+        PointerSizeMagic::<P>::default().read_from_file(reader)?;
         self.data.set_read_params(self._read_n, self.header.chunklen);
         self.data.read_from_file::<P, _>(reader)?;
         Ok(())
@@ -893,13 +894,14 @@ impl PRGIChunk {
 }
 impl PRGIChunk {
     pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        Ok(self.header.write_to_file(writer)? + self.data.write_to_file::<P, _>(writer).map_err(|e| match e {
+        Ok(self.header.write_to_file(writer)? + PointerSizeMagic::<P>::default().write_to_file(writer)? + self.data.write_to_file::<P, _>(writer).map_err(|e| match e {
             DSEError::Placeholder() => DSEError::PointerTableTooLarge(DSEBlockType::SwdlPrgi),
             _ => e
         })?)
     }
     pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         self.header.read_from_file(reader)?;
+        PointerSizeMagic::<P>::default().read_from_file(reader)?;
         self.data.set_read_params(self._read_n, self.header.chunklen);
         self.data.read_from_file::<P, _>(reader)?;
         Ok(())
