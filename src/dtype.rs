@@ -1,5 +1,5 @@
 use core::panic;
-use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, any::TypeId};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
 use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive, CheckedSub, FromPrimitive};
@@ -457,6 +457,7 @@ pub trait Pointer<O: ByteOrder>: Unsigned + AsPrimitive<u64> + FromPrimitive + T
     fn read<R: Read>(reader: &mut R) -> Result<Self, std::io::Error>;
     fn write_as_bytes(self, buf: &mut [u8]);
     fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error>;
+    fn use_magic() -> Option<Self>;
 }
 impl<O: ByteOrder> Pointer<O> for u16 {
     fn read_from_bytes(buf: &[u8]) -> u16 {
@@ -470,6 +471,9 @@ impl<O: ByteOrder> Pointer<O> for u16 {
     }
     fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error> {
         writer.write_u16::<O>(self)
+    }
+    fn use_magic() -> Option<u16> {
+        None
     }
 }
 impl<O: ByteOrder> Pointer<O> for u32 {
@@ -485,14 +489,17 @@ impl<O: ByteOrder> Pointer<O> for u32 {
     fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error> {
         writer.write_u32::<O>(self)
     }
+    fn use_magic() -> Option<u32> {
+        Some(u32::MAX)
+    }
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let bytes_per_pointer = std::mem::size_of::<P>();
-        let pointer_table_byte_len = if TypeId::of::<P>() == TypeId::of::<u16>() {
-            self.slots() * bytes_per_pointer
-        } else {
+        let pointer_table_byte_len = if P::use_magic().is_some() {
             (self.slots() + 1) * bytes_per_pointer
+        } else {
+            self.slots() * bytes_per_pointer
         };
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
         let first_pointer = pointer_table_byte_len_aligned;
@@ -501,12 +508,12 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         let mut accumulated_object_data_cursor = Cursor::new(&mut accumulated_object_data);
         let pointer_table_start = writer.seek(SeekFrom::Current(0))?;
         writer.write_all(&vec![0; pointer_table_byte_len as usize])?;
-        if TypeId::of::<P>() != TypeId::of::<u16>() {
+        if let Some(magic) = P::use_magic() {
             writer.seek(SeekFrom::Start(pointer_table_start))?;
-            P::max_value().write(writer)?;
+            magic.write(writer)?;
         }
         for (i, val) in self.objects.iter().enumerate() {
-            let i = val.is_self_indexed().unwrap_or(i) + (TypeId::of::<P>() != TypeId::of::<u16>()) as usize;
+            let i = val.is_self_indexed().unwrap_or(i) + P::use_magic().is_some() as usize;
             writer.seek(SeekFrom::Start(pointer_table_start + i as u64 * bytes_per_pointer as u64))?;
             if P::read(writer)? == P::zero() {
                 // Pointer has not been written in yet
@@ -532,10 +539,10 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         let bytes_per_pointer = std::mem::size_of::<P>();
         let start_of_pointer_table = reader.seek(SeekFrom::Current(0))?;
-        if TypeId::of::<P>() != TypeId::of::<u16>() {
+        if P::use_magic().is_some() {
             reader.seek(SeekFrom::Current(bytes_per_pointer as i64))?;
         }
-        let start = (TypeId::of::<P>() != TypeId::of::<u16>()) as usize;
+        let start = P::use_magic().is_some() as usize;
         for i in start..(self._read_n + start) {
             let nbyte_offset_from_start_of_pointer_table = P::read(reader)?;
             if nbyte_offset_from_start_of_pointer_table != P::zero() {
