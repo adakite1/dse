@@ -419,7 +419,7 @@ pub mod events {
         "SetLFORoute" => (false, 0xF3, 3), // Set what LFO is routed to what, and whether its enabled
         "0xF4" => (true, 0xF4, 0),
         "0xF5" => (true, 0xF5, 0),
-        "0xF6" => (false, 0xF6, 1),
+        "Signal" => (false, 0xF6, 1),
         "0xF7" => (true, 0xF7, 0),
         "SkipNext2Bytes2" => (false, 0xF8, 2), // While this isn't supposed to have any parameters, setting the parameters to 2 is an easy way to implement this without changing things too much.
         "0xF9" => (true, 0xF9, 0),

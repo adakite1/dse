@@ -140,11 +140,16 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                     midly::MetaMessage::Lyric(_) => { /* Ignore */ },
                     midly::MetaMessage::Marker(marker) => {
                         if let Ok(marker) = String::from_utf8(marker.into()) {
-                            if marker.trim() == "LoopStart" {
+                            if marker.trim().to_lowercase() == "loopstart" {
                                 for trk in trks.iter_mut() {
                                     trk.fix_current_global_tick(global_tick)?;
                                     trk.add_other_no_params("LoopPoint")?;
                                 }
+                            } else if marker.trim().to_lowercase().starts_with("signal") {
+                                let cmd = marker.trim().to_lowercase();
+                                let signal_val: u8 = cmd[6..].replace("(", "").replace(")", "").parse::<u8>().map_err(|_| DSEError::Invalid("MIDI Marker 'Signal(n)' must have a uint8 as its parameter!".to_string()))?;
+                                trks[0].fix_current_global_tick(global_tick)?;
+                                trks[0].add_other_with_params_u8("Signal", signal_val)?;
                             }
                         }
                     },
