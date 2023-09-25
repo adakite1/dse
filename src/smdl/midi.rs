@@ -147,7 +147,7 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                                 }
                             } else if marker.trim().to_lowercase().starts_with("signal") {
                                 let cmd = marker.trim().to_lowercase();
-                                let signal_val: u8 = cmd[6..].replace("(", "").replace(")", "").parse::<u8>().map_err(|_| DSEError::Invalid("MIDI Marker 'Signal(n)' must have a uint8 as its parameter!".to_string()))?;
+                                let signal_val: u8 = cmd[6..].replace("(", "").replace(")", "").trim().parse::<u8>().map_err(|_| DSEError::Invalid("MIDI Marker 'Signal(n)' must have a uint8 as its parameter!".to_string()))?;
                                 trks[0].fix_current_global_tick(global_tick)?;
                                 trks[0].add_other_with_params_u8("Signal", signal_val)?;
                             }
