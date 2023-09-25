@@ -49,6 +49,18 @@ impl SongBuilderFlags {
         Self::from_bits_retain(swdl.header.unk18)
     }
 }
+pub trait SetSongBuilderFlags {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags;
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags);
+}
+impl SetSongBuilderFlags for SWDL {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags {
+        SongBuilderFlags::from_bits_retain(self.header.unk18)
+    }
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags) {
+        self.header.unk18 = flags.bits();
+    }
+}
 
 pub struct DSPOptions {
     pub ppmdu_mainbank: bool,

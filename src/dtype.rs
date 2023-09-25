@@ -1,8 +1,8 @@
 use core::panic;
-use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, any::TypeId};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
-use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive};
+use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive, CheckedSub, FromPrimitive};
 use serde::{Serialize, Deserialize};
 
 use crate::swdl::{ADSRVolumeEnvelope, DSEString, Tuning};
@@ -452,7 +452,7 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         }
     }
 }
-pub trait Pointer<O: ByteOrder>: Unsigned + AsPrimitive<u64> + TryFrom<usize> + FromBytes + ToBytes + PrimInt + Eq + Zero {
+pub trait Pointer<O: ByteOrder>: Unsigned + AsPrimitive<u64> + FromPrimitive + TryFrom<usize> + FromBytes + ToBytes + PrimInt + Eq + Zero + CheckedSub {
     fn read_from_bytes(buf: &[u8]) -> Self;
     fn read<R: Read>(reader: &mut R) -> Result<Self, std::io::Error>;
     fn write_as_bytes(self, buf: &mut [u8]);
@@ -489,7 +489,11 @@ impl<O: ByteOrder> Pointer<O> for u32 {
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let bytes_per_pointer = std::mem::size_of::<P>();
-        let pointer_table_byte_len = self.slots() * bytes_per_pointer;
+        let pointer_table_byte_len = if TypeId::of::<P>() == TypeId::of::<u16>() {
+            self.slots() * bytes_per_pointer
+        } else {
+            (self.slots() + 1) * bytes_per_pointer
+        };
         let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
         let first_pointer = pointer_table_byte_len_aligned;
         let mut accumulated_write = 0;
@@ -497,8 +501,12 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         let mut accumulated_object_data_cursor = Cursor::new(&mut accumulated_object_data);
         let pointer_table_start = writer.seek(SeekFrom::Current(0))?;
         writer.write_all(&vec![0; pointer_table_byte_len as usize])?;
+        if TypeId::of::<P>() != TypeId::of::<u16>() {
+            writer.seek(SeekFrom::Start(pointer_table_start))?;
+            P::max_value().write(writer)?;
+        }
         for (i, val) in self.objects.iter().enumerate() {
-            let i = val.is_self_indexed().unwrap_or(i);
+            let i = val.is_self_indexed().unwrap_or(i) + (TypeId::of::<P>() != TypeId::of::<u16>()) as usize;
             writer.seek(SeekFrom::Start(pointer_table_start + i as u64 * bytes_per_pointer as u64))?;
             if P::read(writer)? == P::zero() {
                 // Pointer has not been written in yet
@@ -524,13 +532,17 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
         let bytes_per_pointer = std::mem::size_of::<P>();
         let start_of_pointer_table = reader.seek(SeekFrom::Current(0))?;
-        for i in 0..self._read_n {
+        if TypeId::of::<P>() != TypeId::of::<u16>() {
+            reader.seek(SeekFrom::Current(bytes_per_pointer as i64))?;
+        }
+        let start = (TypeId::of::<P>() != TypeId::of::<u16>()) as usize;
+        for i in start..(self._read_n + start) {
             let nbyte_offset_from_start_of_pointer_table = P::read(reader)?;
             if nbyte_offset_from_start_of_pointer_table != P::zero() {
                 reader.seek(SeekFrom::Start(start_of_pointer_table + nbyte_offset_from_start_of_pointer_table.as_()))?;
                 let mut object = T::default();
                 object.read_from_file(reader)?;
-                reader.seek(SeekFrom::Start(start_of_pointer_table + (i as u64 + 1) * 2))?;
+                reader.seek(SeekFrom::Start(start_of_pointer_table + (i as u64 + 1) * bytes_per_pointer as u64))?;
                 self.objects.push(object);
             }
         }
