@@ -73,6 +73,16 @@ pub enum DSEError {
 
     #[error("{0}")]
     Invalid(String),
+    #[error("DSE command '{0}' is invalid! {1}")]
+    InvalidDSECommand(String, String),
+    #[error("Failed to parse switch track command '{0}'!")]
+    InvalidDSECommandFailedToParseTrkChange(String),
+    #[error("DSE command '{0}' specifies {1} bytes of arguments, but DSE event {2} takes {3} bytes of arguments!")]
+    InvalidDSECommandArguments(String, usize, String, usize),
+    #[error("DSE command '{0}' specifies a typed argument '{1}', but it could not be parsed as that type! ({2})")]
+    InvalidDSECommandTypedArgument(String, String, String),
+    #[error("DSE command '{0}' specifies a typed argument '{1}' with an unknown type '{2}'!")]
+    InvalidDSECommandUnknownType(String, String, String),
     #[error("Couldn't convert filename for {0} file with path '{1}' into a UTF-8 Rust String. Filenames should be pure-ASCII only!")]
     DSEFileNameConversionNonUTF8(String, String),
     #[error("Couldn't convert filename for {0} file with path '{1}' into an ASCII string. Filenames should be pure-ASCII only!")]

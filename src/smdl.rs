@@ -462,7 +462,10 @@ pub mod events {
                 Ok(code_u8)
             } else if let Ok(code_u8) = u8::from_str_radix(name.trim_start_matches("0x"), 16) {
                 Ok(code_u8)
-            } else {
+            } /* else if let Some((_, (_, code_u8, _))) = CODE_TRANSLATIONS.entries().find(|(canonical_name, _)| canonical_name.to_lowercase() == name.trim().to_lowercase()) {
+                // Unused reference implementation of a fallback case
+                Ok(*code_u8)
+            } */ else {
                 Err(DSEError::DSEEventNameLookupError(name.to_string()))
             }
         }
