@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::{HashMap, BTreeSet, BTreeMap}, u8, hash::Hash, io::Write};
 
-use byteorder::{WriteBytesExt, LittleEndian, BigEndian};
+use byteorder::{WriteBytesExt, LittleEndian, BigEndian, ByteOrder};
 use colored::Colorize;
 use midly::{Smf, TrackEvent, num::{u4, u28, u24}};
 
@@ -125,7 +125,10 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                         trks[channel_i].program_change(program.as_int(), &mut map_program)?;
                     },
                     midly::MidiMessage::ChannelAftertouch { vel } => { /* Ignore channel aftertouch events */ },
-                    midly::MidiMessage::PitchBend { bend } => { /* Ignore pitchbend events */ },
+                    midly::MidiMessage::PitchBend { bend } => {
+                        trks[channel_i].fix_current_global_tick(global_tick)?;
+                        trks[channel_i].add_other_with_params_i16::<BigEndian>("PitchBend", bend.as_int())?;
+                    },
                 }
             },
             midly::TrackEventKind::SysEx(_) => { /* Ignore sysex events */ },
@@ -519,6 +522,18 @@ impl TrkChunkWriter {
         let mut evt = Other::default();
         evt.code = Other::name_to_code(name)?;
         (&mut evt.parameters[..]).write_u8(val)?;
+        Ok(self.add_other_event(evt))
+    }
+    pub fn add_other_with_params_i16<E: ByteOrder>(&mut self, name: &str, val: i16) -> Result<usize, DSEError> {
+        let mut evt = Other::default();
+        evt.code = Other::name_to_code(name)?;
+        (&mut evt.parameters[..]).write_i16::<E>(val)?;
+        Ok(self.add_other_event(evt))
+    }
+    pub fn add_other_with_params_u16<E: ByteOrder>(&mut self, name: &str, val: u16) -> Result<usize, DSEError> {
+        let mut evt = Other::default();
+        evt.code = Other::name_to_code(name)?;
+        (&mut evt.parameters[..]).write_u16::<E>(val)?;
         Ok(self.add_other_event(evt))
     }
     pub fn add_swdl(&mut self, unk2: u8) -> Result<usize, DSEError> {
