@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::{HashMap, BTreeSet}, u8, hash::Hash};
+use std::{borrow::Cow, collections::{HashMap, BTreeSet, BTreeMap}, u8, hash::Hash};
 
 use byteorder::{WriteBytesExt, LittleEndian};
 use colored::Colorize;
@@ -182,11 +182,11 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
 pub struct ProgramUsed {
     pub bank: u8,
     pub program: u8,
-    pub notes: BTreeSet<u8>
+    pub notes: BTreeMap<u8, BTreeSet<u8>>
 }
 impl ProgramUsed {
     pub fn new(bank: u8, program: u8) -> ProgramUsed {
-        ProgramUsed { bank, program, notes: BTreeSet::new() }
+        ProgramUsed { bank, program, notes: BTreeMap::new() }
     }
     pub fn from_dse(id: u8) -> ProgramUsed {
         ProgramUsed::new(id / 128, id % 128)
@@ -301,7 +301,7 @@ impl TrkChunkWriter {
         let note_on_evt_index = self.add(DSEEvent::PlayNote(evt));
         self.notes_held.insert(key, (note_on_evt_index, self.current_global_tick));
         if let Some(program_used) = self.programs_used.last_mut() {
-            program_used.notes.insert(key);
+            program_used.notes.entry(key).or_insert(BTreeSet::new()).insert(vel);
         }
         Ok(())
     }
