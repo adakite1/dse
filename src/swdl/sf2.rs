@@ -350,7 +350,10 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::Keynum => {  },
                     soundfont::data::GeneratorType::Velocity => {  },
                     soundfont::data::GeneratorType::InitialAttenuation => {
-                        let decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                        let mut decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                        // Every 1dB of attenuation specified should attenuate by 0.4dB
+                        // See https://www.polyphone-soundfonts.com/forum/soundfonts-help/29-understanding-attenuation for more information
+                        decibels *= 0.4;
                         split_entry.smplvol = (gain(decibels) * 127.0).round() as i8;
                     },
                     soundfont::data::GeneratorType::Reserved2 => {  },
