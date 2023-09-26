@@ -75,7 +75,7 @@ pub fn get_midi_messages_flattened<'a>(smf: &'a Smf) -> Result<Cow<'a, [TrackEve
     }
 }
 
-pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &mut [TrkChunkWriter], mut map_program: impl FnMut(u8, u8, bool) -> Option<u8>) -> Result<u128, DSEError> {
+pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &mut [TrkChunkWriter], mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<u128, DSEError> {
     // Loop through all the events
     let mut global_tick = 0;
     for midi_msg in midi_messages.as_ref() {
@@ -240,7 +240,7 @@ impl TrkChunkWriter {
     pub fn programs_used(&self) -> &Vec<ProgramUsed> {
         &self.programs_used
     }
-    pub fn bank_select(&mut self, bank: u8, mut map_program: impl FnMut(u8, u8, bool) -> Option<u8>) -> Result<Option<usize>, DSEError> {
+    pub fn bank_select(&mut self, bank: u8, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
         self.bank = bank;
         let mut same_tick = false;
         if let &Some(last_program_change_global_tick) = &self.last_program_change_global_tick {
@@ -256,7 +256,7 @@ impl TrkChunkWriter {
         }
         self.programs_used.push(ProgramUsed::new(self.bank, self.program));
         self.last_program_change_global_tick = Some(self.current_global_tick);
-        if let Some(program_id) = map_program(self.bank, self.program, same_tick) {
+        if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self) {
             self.last_program_change_event_index = Some(self.add_other_with_params_u8("SetProgram", program_id)?);
             Ok(self.last_program_change_event_index)
         } else {
@@ -264,7 +264,7 @@ impl TrkChunkWriter {
             Ok(None)
         }
     }
-    pub fn program_change(&mut self, prgm: u8, mut map_program: impl FnMut(u8, u8, bool) -> Option<u8>) -> Result<Option<usize>, DSEError> {
+    pub fn program_change(&mut self, prgm: u8, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
         self.program = prgm;
         let mut same_tick = false;
         if let &Some(last_program_change_global_tick) = &self.last_program_change_global_tick {
@@ -280,7 +280,7 @@ impl TrkChunkWriter {
         }
         self.programs_used.push(ProgramUsed::new(self.bank, self.program));
         self.last_program_change_global_tick = Some(self.current_global_tick);
-        if let Some(program_id) = map_program(self.bank, self.program, same_tick) {
+        if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self) {
             self.last_program_change_event_index = Some(self.add_other_with_params_u8("SetProgram", program_id)?);
             Ok(self.last_program_change_event_index)
         } else {
@@ -347,10 +347,19 @@ impl TrkChunkWriter {
     pub fn add_bank(&mut self, unk1: u8) -> Result<usize, DSEError> {
         self.add_other_with_params_u8("SetBank", unk1)
     }
+    pub fn next_event_index(&self) -> usize {
+        self.trk_events.len()
+    }
     pub fn add(&mut self, event: DSEEvent) -> usize {
         let new_event_index = self.trk_events.len();
         self.trk_events.push((true, event));
         new_event_index
+    }
+    pub fn get_event(&mut self, index: usize) -> Option<&(bool, DSEEvent)> {
+        self.trk_events.get(index)
+    }
+    pub fn get_event_mut(&mut self, index: usize) -> Option<&mut (bool, DSEEvent)> {
+        self.trk_events.get_mut(index)
     }
     pub fn add_playnote_event(&mut self, playnote: PlayNote) -> usize {
         self.add(DSEEvent::PlayNote(playnote))
