@@ -10,7 +10,7 @@ use crate::dtype::{DSEError, PointerTable, ReadWrite};
 
 use dse_dsp_sys::{process_mono_preserve_looping, SampleRateChoicePreference};
 use soundfont::data::{SampleHeader, GeneratorType};
-use soundfont::{SoundFont2, Zone, Preset};
+use soundfont::{SoundFont2, Zone, Preset, Instrument};
 
 use super::{BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE, lookup_env_time_value_i16, lookup_env_time_value_i32, SWDLHeader};
 
@@ -213,7 +213,10 @@ where
     Ok((sample_mappings, sample_infos))
 }
 
-pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
+pub fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
+    zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
+}
+pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_instruments: impl FnMut(u16, &Preset, Option<&Zone>, &Zone, &Instrument) -> bool, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
     // Loop through the presets and use it to fill in the track swdl object
     for (i, preset) in sf2.presets.iter().enumerate() {
         // Create blank programinfo object
@@ -232,9 +235,6 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
         /// 
         /// Returns `true` if the zone provided is a global zone
         fn apply_zone_data_to_split(split_entry: &mut SplitEntry, additive: Option<&[&Zone]>, zone: &Zone, sample_infos: &mut BTreeMap<u16, SampleInfo>, sample_i: u16, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64) {
-            fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
-                zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
-            }
             // https://stackoverflow.com/questions/67016985/map-numeric-range-rust
             fn map_range(from_range: (f64, f64), to_range: (f64, f64), s: f64) -> f64 {
                 to_range.0 + (s - from_range.0) * (to_range.1 - to_range.0) / (from_range.1 - from_range.0)
@@ -507,7 +507,11 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
         let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
             if let Some(&instrument_i) = preset_zone.instrument() {
                 let instrument = &sf2.instruments[instrument_i as usize];
-                create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust)
+                if filter_instruments(instrument_i, &preset, global_preset_zone, preset_zone, instrument) {
+                    create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust)
+                } else {
+                    Vec::new() // The instrument has been filtered out
+                }
             } else if i == 0 {
                 global_preset_zone = Some(preset_zone);
                 println!("{}", "Global preset zone detected!".green());

@@ -190,7 +190,7 @@ fn main() -> Result<(), DSEError> {
                 }
 
                 // Vec of TrkChunkWriter's
-                let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::create(i as u8, i as u8, smdl.get_link_bytes(), None).unwrap());
+                let mut trks: [TrkChunkWriter; 17] = std::array::from_fn(|i| TrkChunkWriter::create(i as u8, i as u8, smdl.get_link_bytes()).unwrap());
                 // Copy midi messages
                 let _ = copy_midi_messages(midi_messages, &mut trks, |_, bank, program, _, _| {
                     if *midi_prgch {

@@ -105,7 +105,7 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                         match controller.as_int() {
                             00 => { // CC00 Bank Select MSB
                                 println!("{}", "Processing bank select message.".green());
-                                trks[channel_i].bank_select(value.as_int(), &mut map_program)?;
+                                trks[channel_i].bank_select(value.as_int(), false, &mut map_program)?;
                             },
                             07 => { // CC07 Volume MSB
                                 trks[channel_i].add_other_with_params_u8("SetTrackVolume", value.as_int())?;
@@ -122,7 +122,7 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                     midly::MidiMessage::ProgramChange { program } => {
                         trks[channel_i].fix_current_global_tick(global_tick)?;
                         println!("{}", "Processing program change message.".green());
-                        trks[channel_i].program_change(program.as_int(), &mut map_program)?;
+                        trks[channel_i].program_change(program.as_int(), false, &mut map_program)?;
                     },
                     midly::MidiMessage::ChannelAftertouch { vel } => { /* Ignore channel aftertouch events */ },
                     midly::MidiMessage::PitchBend { bend } => {
@@ -365,17 +365,21 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
 pub struct ProgramUsed {
     pub bank: u8,
     pub program: u8,
+    pub is_default: bool,
     pub notes: BTreeMap<u8, BTreeSet<u8>>
 }
 impl ProgramUsed {
-    pub fn new(bank: u8, program: u8) -> ProgramUsed {
-        ProgramUsed { bank, program, notes: BTreeMap::new() }
+    pub fn new(bank: u8, program: u8, is_default: bool) -> ProgramUsed {
+        ProgramUsed { bank, program, is_default, notes: BTreeMap::new() }
     }
-    pub fn from_dse(id: u8) -> ProgramUsed {
-        ProgramUsed::new(id / 128, id % 128)
+    pub fn from_dse(id: u8, is_default: bool) -> ProgramUsed {
+        ProgramUsed::new(id / 128, id % 128, is_default)
     }
     pub fn to_dse(&self) -> u8 {
         self.bank * 128 + self.program
+    }
+    pub fn is_default(&self) -> bool {
+        self.is_default
     }
 }
 impl PartialEq for ProgramUsed {
@@ -403,7 +407,7 @@ pub struct TrkChunkWriter {
     last_program_change_event_index: Option<usize>
 }
 impl TrkChunkWriter {
-    pub fn create(trkid: u8, chanid: u8, link_bytes: (u8, u8), default_program: Option<u8>) -> Result<TrkChunkWriter, DSEError> {
+    pub fn create(trkid: u8, chanid: u8, link_bytes: (u8, u8)) -> Result<TrkChunkWriter, DSEError> {
         let mut trk_chunk_writer = TrkChunkWriter { trkid, chanid, current_global_tick: 0, trk_events: Vec::new(), notes_held: HashMap::new(), bank: 0, program: 0, programs_used: Vec::new(), last_program_change_global_tick: None, last_program_change_event_index: None };
 
         // Fill in some standard events
@@ -411,11 +415,6 @@ impl TrkChunkWriter {
         if !(trkid == 0 && chanid == 0) {
             trk_chunk_writer.add_swdl(link_bytes.1)?;
             trk_chunk_writer.add_bank(link_bytes.0)?;
-            if let Some(default_program) = default_program {
-                //TODO: This setting for the default_program is currently decoupled with self.bank/self.program and the other bank and program select systems. It might be necessary at some point to link this back in with those.
-                trk_chunk_writer.last_program_change_event_index = Some(trk_chunk_writer.add_other_with_params_u8("SetProgram", default_program)?);
-                trk_chunk_writer.programs_used.push(ProgramUsed::from_dse(default_program));   
-            }
         }
 
         Ok(trk_chunk_writer)
@@ -423,7 +422,7 @@ impl TrkChunkWriter {
     pub fn programs_used(&self) -> &Vec<ProgramUsed> {
         &self.programs_used
     }
-    pub fn bank_select(&mut self, bank: u8, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
+    pub fn bank_select(&mut self, bank: u8, is_default: bool, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
         self.bank = bank;
         let mut same_tick = false;
         if let &Some(last_program_change_global_tick) = &self.last_program_change_global_tick {
@@ -437,7 +436,7 @@ impl TrkChunkWriter {
                 }
             }
         }
-        self.programs_used.push(ProgramUsed::new(self.bank, self.program));
+        self.programs_used.push(ProgramUsed::new(self.bank, self.program, is_default));
         self.last_program_change_global_tick = Some(self.current_global_tick);
         if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self) {
             self.last_program_change_event_index = Some(self.add_other_with_params_u8("SetProgram", program_id)?);
@@ -447,7 +446,7 @@ impl TrkChunkWriter {
             Ok(None)
         }
     }
-    pub fn program_change(&mut self, prgm: u8, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
+    pub fn program_change(&mut self, prgm: u8, is_default: bool, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
         self.program = prgm;
         let mut same_tick = false;
         if let &Some(last_program_change_global_tick) = &self.last_program_change_global_tick {
@@ -461,7 +460,7 @@ impl TrkChunkWriter {
                 }
             }
         }
-        self.programs_used.push(ProgramUsed::new(self.bank, self.program));
+        self.programs_used.push(ProgramUsed::new(self.bank, self.program, is_default));
         self.last_program_change_global_tick = Some(self.current_global_tick);
         if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self) {
             self.last_program_change_event_index = Some(self.add_other_with_params_u8("SetProgram", program_id)?);
