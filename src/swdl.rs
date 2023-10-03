@@ -788,6 +788,9 @@ impl ReadWrite for ProgramInfo {
         bytes_written += self.lfo_table.write_to_file(writer)?;
         // bytes_written += self._delimiter.write_to_file(writer)?;
         bytes_written += vec![self.header.PadByte; 16].write_to_file(writer)?;
+        if self.splits_table.objects.len() == 256 {
+            return Err(DSEError::Invalid("A preset has more than 255 sample mappings (in fact it has exactly 256)! If the tool works (this is a special case so it will), the final file will still play silence!".to_string()));
+        }
         bytes_written += self.splits_table.write_to_file(writer)?;
         Ok(bytes_written)
     }
