@@ -216,7 +216,7 @@ where
 pub fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
     zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
 }
-pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_instruments: impl FnMut(u16, &Preset, Option<&Zone>, &Zone, &Instrument) -> bool, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
+pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_instruments: impl FnMut(&Preset, Option<&Zone>, usize, &Zone, u16, &Instrument) -> bool, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
     // Loop through the presets and use it to fill in the track swdl object
     for (i, preset) in sf2.presets.iter().enumerate() {
         // Create blank programinfo object
@@ -333,14 +333,36 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::Instrument => {  },
                     soundfont::data::GeneratorType::Reserved1 => {  },
                     soundfont::data::GeneratorType::KeyRange => {
-                        if let None = additive {
+                        if let Some(additive_source_zones) = additive {
+                            if let Some(base_key_range_gen) = find_in_zones(additive_source_zones, soundfont::data::GeneratorType::KeyRange) {
+                                let base_key_range_value = base_key_range_gen.amount.as_range().unwrap();
+                                let limiting_key_range_value = gen.amount.as_range().unwrap();
+                                split_entry.lowkey = (base_key_range_value.low as i8).max(limiting_key_range_value.low as i8);
+                                split_entry.hikey = (base_key_range_value.high as i8).min(limiting_key_range_value.high as i8);
+                            } else {
+                                let key_range_value = gen.amount.as_range().unwrap();
+                                split_entry.lowkey = key_range_value.low as i8;
+                                split_entry.hikey = key_range_value.high as i8;
+                            }
+                        } else {
                             let key_range_value = gen.amount.as_range().unwrap();
                             split_entry.lowkey = key_range_value.low as i8;
                             split_entry.hikey = key_range_value.high as i8;
                         }
                     },
                     soundfont::data::GeneratorType::VelRange => {
-                        if let None = additive {
+                        if let Some(additive_source_zones) = additive {
+                            if let Some(base_vel_range_gen) = find_in_zones(additive_source_zones, soundfont::data::GeneratorType::VelRange) {
+                                let base_vel_range_value = base_vel_range_gen.amount.as_range().unwrap();
+                                let limiting_vel_range_value = gen.amount.as_range().unwrap();
+                                split_entry.lovel = (base_vel_range_value.low as i8).max(limiting_vel_range_value.low as i8);
+                                split_entry.hivel = (base_vel_range_value.high as i8).min(limiting_vel_range_value.high as i8);
+                            } else {
+                                let vel_range_value = gen.amount.as_range().unwrap();
+                                split_entry.lovel = vel_range_value.low as i8;
+                                split_entry.hivel = vel_range_value.high as i8;
+                            }
+                        } else {
                             let vel_range_value = gen.amount.as_range().unwrap();
                             split_entry.lovel = vel_range_value.low as i8;
                             split_entry.hivel = vel_range_value.high as i8;
@@ -507,7 +529,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
         let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
             if let Some(&instrument_i) = preset_zone.instrument() {
                 let instrument = &sf2.instruments[instrument_i as usize];
-                if filter_instruments(instrument_i, &preset, global_preset_zone, preset_zone, instrument) {
+                if filter_instruments(&preset, global_preset_zone, i, preset_zone, instrument_i, instrument) {
                     create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust)
                 } else {
                     Vec::new() // The instrument has been filtered out
