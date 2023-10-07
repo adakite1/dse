@@ -212,7 +212,7 @@ fn main() -> Result<(), DSEError> {
                 let mut track_swdl = create_swdl_shell(get_file_last_modified_date_with_default(&input_file_path)?, fname)?;
 
                 let mut prgi = PRGIChunk::new(0);
-                copy_presets(&sf2, &mut sample_infos, &mut prgi.data, |i| Some(sample_mappings.get(&i).copied().ok_or(DSEError::WrapperString(format!("{}Failed to map sample {}!", "Internal Error: ".red(), i))).unwrap()), *sample_rate_adjustment_curve, *pitch_adjust, |_, _, _, _, _, _| true, |_, preset, _| Some(preset.header.bank * 128 + preset.header.preset));
+                copy_presets(&sf2, &mut sample_infos, &mut prgi.data, |i| Some(sample_mappings.get(&i).copied().ok_or(DSEError::WrapperString(format!("{}Failed to map sample {}!", "Internal Error: ".red(), i))).unwrap()), *sample_rate_adjustment_curve, *pitch_adjust, |_, _, _, _, _, _, _| true, |_, preset, _| Some(preset.header.bank * 128 + preset.header.preset));
                 track_swdl.prgi = Some(prgi);
 
                 // Add the sample info objects last

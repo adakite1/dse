@@ -210,9 +210,9 @@ where
 pub fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
     zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
 }
-pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_instruments: impl FnMut(&Preset, Option<&Zone>, usize, &Zone, u16, &Instrument) -> bool, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
+pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_instruments: impl FnMut(usize, &Preset, Option<&Zone>, usize, &Zone, u16, &Instrument) -> bool, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
     // Loop through the presets and use it to fill in the track swdl object
-    for (i, preset) in sf2.presets.iter().enumerate() {
+    for (preset_i, preset) in sf2.presets.iter().enumerate() {
         // Create blank programinfo object
         let mut program_info = ProgramInfo::default();
 
@@ -520,15 +520,15 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
 
         // Create splits
         let mut global_preset_zone: Option<&Zone> = None;
-        let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(i, preset_zone)| {
+        let splits: Vec<SplitEntry> = preset.zones.iter().enumerate().map(|(preset_zone_i, preset_zone)| {
             if let Some(&instrument_i) = preset_zone.instrument() {
                 let instrument = &sf2.instruments[instrument_i as usize];
-                if filter_instruments(&preset, global_preset_zone, i, preset_zone, instrument_i, instrument) {
+                if filter_instruments(preset_i, &preset, global_preset_zone, preset_zone_i, preset_zone, instrument_i, instrument) {
                     create_splits_from_zones(global_preset_zone, preset_zone, &instrument.zones, sample_infos, &mut map_samples, sample_rate_adjustment_curve, pitch_adjust)
                 } else {
                     Vec::new() // The instrument has been filtered out
                 }
-            } else if i == 0 {
+            } else if preset_zone_i == 0 {
                 global_preset_zone = Some(preset_zone);
                 println!("{}", "Global preset zone detected!".green());
                 Vec::new() // The global preset zone should not be included.
@@ -543,7 +543,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
         program_info.splits_table.objects = splits;
 
         // Add to the prgi chunk
-        if let Some(mapping) = map_presets(i, preset, &program_info) {
+        if let Some(mapping) = map_presets(preset_i, preset, &program_info) {
             program_info.header.id = mapping;
             prgi_pointer_table.objects.push(program_info);
         }
