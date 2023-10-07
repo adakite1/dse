@@ -63,7 +63,6 @@ impl SetSongBuilderFlags for SWDL {
 }
 
 pub struct DSPOptions {
-    pub ppmdu_mainbank: bool,
     pub resample_threshold: u32,
     pub sample_rate: f64,
     pub sample_rate_relative: bool,
@@ -178,11 +177,6 @@ where
             let raw_sample_data_len_32 = raw_sample_data.len() as u32 / 4;
             sample_info.loopbeg = (new_loop_bounds[0] as u32 / 4).min(raw_sample_data_len_32); // Set new loopbeg
             sample_info.looplen = raw_sample_data_len_32 - sample_info.loopbeg; // Set new looplen
-            if dsp_options.ppmdu_mainbank {
-                if sample_info.loopbeg >= sample_info.looplen {
-                    sample_info.loopbeg -= sample_info.looplen;
-                }
-            }
             raw_sample_data.resize((sample_info.loopbeg as usize + sample_info.looplen as usize) * 4, 0);
 
             // Write the sample

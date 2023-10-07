@@ -202,7 +202,7 @@ fn main() -> Result<(), DSEError> {
                 
                 let sf2 = SoundFont2::load(&mut File::open(&input_file_path)?).map_err(|x| DSEError::SoundFontParseError(format!("{:?}", x)))?;
                 
-                let (sample_mappings, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { ppmdu_mainbank: false, resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, sample_rate_relative: false, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, *pitch_adjust, |_, _| true)?;
+                let (sample_mappings, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, sample_rate_relative: false, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, *pitch_adjust, |_, _| true)?;
 
                 let fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
                     .to_str().ok_or(DSEError::DSEFileNameConversionNonUTF8("SF2".to_string(), input_file_path.display().to_string()))?
