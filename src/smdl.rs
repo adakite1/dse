@@ -698,6 +698,26 @@ impl DSELinkBytes for SMDL {
     }
 }
 impl SMDL {
+    pub fn set_metadata(&mut self, last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<(), DSEError> {
+        let (year, month, day, hour, minute, second, centisecond) = last_modified;
+
+        self.header.version = 0x415;
+        self.header.year = year;
+        self.header.month = month;
+        self.header.day = day;
+        self.header.hour = hour;
+        self.header.minute = minute;
+        self.header.second = second;
+        self.header.centisecond = centisecond;
+
+        if !fname.is_ascii() {
+            return Err(DSEError::DSEFileNameConversionNonASCII("SMD".to_string(), fname));
+        }
+        fname.truncate(15);
+        self.header.fname = DSEString::<0xFF>::try_from(fname)?;
+
+        Ok(())
+    }
     pub fn regenerate_read_markers(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
         self.header.flen = self.write_to_file(&mut Cursor::new(&mut Vec::new()))?.try_into().map_err(|_| DSEError::BinaryFileTooLarge(DSEFileType::SMDL))?;
@@ -737,23 +757,7 @@ impl ReadWrite for SMDL {
 // Setup empty smdl object
 pub fn create_smdl_shell(last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<SMDL, DSEError> {
     let mut smdl = SMDL::default();
-    let (year, month, day, hour, minute, second, centisecond) = last_modified;
-
-    smdl.header.version = 0x415;
-    smdl.header.year = year;
-    smdl.header.month = month;
-    smdl.header.day = day;
-    smdl.header.hour = hour;
-    smdl.header.minute = minute;
-    smdl.header.second = second;
-    smdl.header.centisecond = centisecond;
-
-    if !fname.is_ascii() {
-        return Err(DSEError::DSEFileNameConversionNonASCII("MIDI".to_string(), fname));
-    }
-    fname.truncate(15);
-    smdl.header.fname = DSEString::<0xFF>::try_from(fname)?;
-
+    smdl.set_metadata(last_modified, fname)?;
     Ok(smdl)
 }
 

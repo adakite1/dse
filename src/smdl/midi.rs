@@ -412,7 +412,7 @@ impl TrkChunkWriter {
 
         // Fill in some standard events
         trk_chunk_writer.add_other_with_params_u8("SetTrackExpression", 100)?; // Random value for now
-        if !(trkid == 0 && chanid == 0) {
+        if !(trkid == 0 /* && chanid == 0 */) {
             trk_chunk_writer.add_swdl(link_bytes.1)?;
             trk_chunk_writer.add_bank(link_bytes.0)?;
         }

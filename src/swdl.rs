@@ -1,6 +1,8 @@
 use core::panic;
-use std::fmt::Display;
+use std::fmt::{Display, Debug};
 use std::io::{Read, Write, Seek, SeekFrom, Cursor};
+use std::fs::File;
+use std::path::Path;
 use bevy_reflect::Reflect;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 use phf::phf_map;
@@ -9,8 +11,11 @@ use serde::{Serialize, Deserialize};
 use crate::peek_magic;
 use crate::dtype::{*};
 use crate::deserialize_with;
+use crate::fileutils::valid_file_of_type;
 
 pub mod sf2;
+
+use bitflags::bitflags;
 
 /// By default, all unknown bytes that do not have a consistent pattern of values in the EoS roms are included in the XML.
 /// However, a subset of these not 100% purpose-certain bytes is 80% or something of values that have "typical" values.
@@ -185,6 +190,56 @@ impl Default for SWDLHeader {
     }
 }
 impl AutoReadWrite for SWDLHeader {  }
+
+bitflags! {
+    /// Although mostly unused within this crate, these bitflags are provided as a standard way to utilize the `unk18` value within the SWDL header.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    pub struct SongBuilderFlags: u32 {
+        /// The WAVI chunk's pointers are extended to use 32-bit unsigned integers.
+        const WAVI_POINTER_EXTENSION = 0b00000001;
+        ///UNUSED!!!
+        const PRGI_POINTER_EXTENSION = 0b00000010;
+        ///UNUSED!!!
+        const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
+    }
+}
+//UNUSED BUT KEPT (Since these flags are not part of DSE itself, but an addition)
+// impl ReadWrite for SongBuilderFlags {
+//     fn write_to_file<W: Read + std::io::Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+//         writer.write_u32::<LittleEndian>(self.bits())?;
+//         Ok(4)
+//     }
+//     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+//         *self = Self::from_bits_retain(reader.read_u32::<LittleEndian>()?);
+//         Ok(())
+//     }
+// }
+impl SongBuilderFlags {
+    pub fn parse_from_swdl_file<R: Read + Seek>(reader: &mut R) -> Result<SongBuilderFlags, DSEError> {
+        let previous_seek_pos = reader.seek(SeekFrom::Current(0))?;
+        
+        let mut swdl_header = SWDLHeader::default();
+        swdl_header.read_from_file(reader)?;
+
+        reader.seek(SeekFrom::Start(previous_seek_pos))?;
+        Ok(Self::from_bits_retain(swdl_header.unk18))
+    }
+    pub fn parse_from_swdl(swdl: &SWDL) -> SongBuilderFlags {
+        Self::from_bits_retain(swdl.header.unk18)
+    }
+}
+pub trait SetSongBuilderFlags {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags;
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags);
+}
+impl SetSongBuilderFlags for SWDL {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags {
+        SongBuilderFlags::from_bits_retain(self.header.unk18)
+    }
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags) {
+        self.header.unk18 = flags.bits();
+    }
+}
 
 #[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct ChunkHeader {
@@ -1047,6 +1102,26 @@ impl SWDL {
         eod.label = 0x20646F65; //  "eod\20" {0x65, 0x6F, 0x64, 0x20} 
         eod
     }
+    pub fn set_metadata(&mut self, last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<(), DSEError> {
+        let (year, month, day, hour, minute, second, centisecond) = last_modified;
+        
+        self.header.version = 0x415;
+        self.header.year = year;
+        self.header.month = month;
+        self.header.day = day;
+        self.header.hour = hour;
+        self.header.minute = minute;
+        self.header.second = second;
+        self.header.centisecond = centisecond;
+
+        if !fname.is_ascii() {
+            return Err(DSEError::DSEFileNameConversionNonASCII("SWD".to_string(), fname));
+        }
+        fname.truncate(15);
+        self.header.fname = DSEString::<0xAA>::try_from(fname)?;
+
+        Ok(())
+    }
     /// Regenerate length, slots, and nb parameters. To keep this working, `write_to_file` should never attempt to read or seek beyond alotted frame, which is initial cursor position and beyond.
     pub fn regenerate_read_markers<PWavi: Pointer<LittleEndian>, PPrgi: Pointer<LittleEndian>>(&mut self) -> Result<(), DSEError> { //TODO: make more efficient
         // ======== NUMERICAL VALUES (LENGTHS, SLOTS, etc) ========
@@ -1169,6 +1244,79 @@ impl SWDL {
         }
         // EOD\20 {0x65, 0x6F, 0x64, 0x20}
         self._eod.read_from_file(reader)?;
+        Ok(())
+    }
+}
+impl SWDL {
+    pub fn load<R: Read + Seek>(file: &mut R) -> Result<SWDL, DSEError> {
+        let flags = SongBuilderFlags::parse_from_swdl_file(file)?;
+
+        let mut swdl = SWDL::default();
+        if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+            swdl.read_from_file::<u32, u32, _>(file)?;
+        } else if flags.contains(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+            swdl.read_from_file::<u32, u16, _>(file)?;
+        } else if flags.contains(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+            swdl.read_from_file::<u16, u32, _>(file)?;
+        } else {
+            swdl.read_from_file::<u16, u16, _>(file)?;
+        }
+
+        Ok(swdl)
+    }
+    pub fn load_xml<R: Read + Seek>(file: &mut R) -> Result<SWDL, DSEError> {
+        let mut st = String::new();
+        file.read_to_string(&mut st)?;
+        let mut swdl = quick_xml::de::from_str::<SWDL>(&st)?;
+
+        let flags = SongBuilderFlags::parse_from_swdl(&swdl);
+
+        if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+            swdl.regenerate_read_markers::<u32, u32>()?;
+        } else if flags.contains(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+            swdl.regenerate_read_markers::<u32, u16>()?;
+        } else if flags.contains(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+            swdl.regenerate_read_markers::<u16, u32>()?;
+        } else {
+            swdl.regenerate_read_markers::<u16, u16>()?;
+        }
+
+        swdl.regenerate_automatic_parameters()?;
+
+        Ok(swdl)
+    }
+    pub fn load_path<P: AsRef<Path> + Debug>(path: P) -> Result<SWDL, DSEError> {
+        let swdl;
+        if valid_file_of_type(&path, "swd") {
+            println!("[*] Opening bank {:?}", &path);
+            swdl = SWDL::load(&mut File::open(path)?)?;
+        } else if valid_file_of_type(&path, "xml") {
+            println!("[*] Opening bank {:?} (xml)", &path);
+            swdl = SWDL::load_xml(&mut File::open(path)?)?;
+        } else {
+            return Err(DSEError::Invalid(format!("File '{:?}' is not an SWD file!", path)));
+        }
+        Ok(swdl)
+    }
+    pub fn save<W: Read + Write + Seek>(&mut self, file: &mut W, flags: SongBuilderFlags) -> Result<(), DSEError> {
+        self.set_song_builder_flags(flags);
+        if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
+            self.regenerate_read_markers::<u32, u32>()?;
+            self.regenerate_automatic_parameters()?;
+            self.write_to_file::<u32, u32, _>(file)?;
+        } else if flags.contains(SongBuilderFlags::WAVI_POINTER_EXTENSION) {
+            self.regenerate_read_markers::<u32, u16>()?;
+            self.regenerate_automatic_parameters()?;
+            self.write_to_file::<u32, u16, _>(file)?;
+        } else if flags.contains(SongBuilderFlags::PRGI_POINTER_EXTENSION) {
+            self.regenerate_read_markers::<u16, u32>()?;
+            self.regenerate_automatic_parameters()?;
+            self.write_to_file::<u16, u32, _>(file)?;
+        } else {
+            self.regenerate_read_markers::<u16, u16>()?;
+            self.regenerate_automatic_parameters()?;
+            self.write_to_file::<u16, u16, _>(file)?;
+        }
         Ok(())
     }
 }
@@ -1298,24 +1446,9 @@ pub fn lookup_env_time_value_i32(msec: i32) -> i8 {
     }
 }
 
-pub fn create_swdl_shell(last_modified: (u16, u8, u8, u8, u8, u8, u8), mut fname: String) -> Result<SWDL, DSEError> {
+pub fn create_swdl_shell(last_modified: (u16, u8, u8, u8, u8, u8, u8), fname: String) -> Result<SWDL, DSEError> {
     let mut track_swdl = SWDL::default();
-    let (year, month, day, hour, minute, second, centisecond) = last_modified;
-    track_swdl.header.version = 0x415;
-    track_swdl.header.year = year;
-    track_swdl.header.month = month;
-    track_swdl.header.day = day;
-    track_swdl.header.hour = hour;
-    track_swdl.header.minute = minute;
-    track_swdl.header.second = second;
-    track_swdl.header.centisecond = centisecond;
-
-    if !fname.is_ascii() {
-        return Err(DSEError::DSEFileNameConversionNonASCII("SF2".to_string(), fname));
-    }
-    fname.truncate(15);
-    track_swdl.header.fname = DSEString::<0xAA>::try_from(fname)?;
-
+    track_swdl.set_metadata(last_modified, fname)?;
     Ok(track_swdl)
 }
 

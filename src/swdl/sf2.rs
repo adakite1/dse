@@ -14,54 +14,6 @@ use soundfont::{SoundFont2, Zone, Preset, Instrument};
 
 use super::{BUILT_IN_SAMPLE_RATE_ADJUSTMENT_TABLE, lookup_env_time_value_i16, lookup_env_time_value_i32, SWDLHeader};
 
-use bitflags::bitflags;
-
-bitflags! {
-    /// Although unused within this crate, these bitflags are provided as a standard way to utilize the `unk18` value within the SWDL header.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-    pub struct SongBuilderFlags: u32 {
-        /// The WAVI chunk's pointers are extended to use 32-bit unsigned integers.
-        const WAVI_POINTER_EXTENSION = 0b00000001;
-        ///UNUSED!!!
-        const PRGI_POINTER_EXTENSION = 0b00000010;
-        ///UNUSED!!!
-        const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
-    }
-}
-//UNUSED BUT KEPT
-// impl ReadWrite for SongBuilderFlags {
-//     fn write_to_file<W: Read + std::io::Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-//         writer.write_u32::<LittleEndian>(self.bits())?;
-//         Ok(4)
-//     }
-//     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
-//         *self = Self::from_bits_retain(reader.read_u32::<LittleEndian>()?);
-//         Ok(())
-//     }
-// }
-impl SongBuilderFlags {
-    pub fn parse_from_swdl_file<R: Read + Seek>(reader: &mut R) -> Result<SongBuilderFlags, DSEError> {
-        let mut swdl_header = SWDLHeader::default();
-        swdl_header.read_from_file(reader)?;
-        Ok(Self::from_bits_retain(swdl_header.unk18))
-    }
-    pub fn parse_from_swdl(swdl: &SWDL) -> SongBuilderFlags {
-        Self::from_bits_retain(swdl.header.unk18)
-    }
-}
-pub trait SetSongBuilderFlags {
-    fn get_song_builder_flags(&self) -> SongBuilderFlags;
-    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags);
-}
-impl SetSongBuilderFlags for SWDL {
-    fn get_song_builder_flags(&self) -> SongBuilderFlags {
-        SongBuilderFlags::from_bits_retain(self.header.unk18)
-    }
-    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags) {
-        self.header.unk18 = flags.bits();
-    }
-}
-
 pub struct DSPOptions {
     pub resample_threshold: u32,
     pub sample_rate: f64,
@@ -207,7 +159,7 @@ where
     Ok((sample_mappings, sample_infos))
 }
 
-pub fn find_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
+pub fn find_gen_in_zones<'a>(zones: &'a [&Zone], ty: GeneratorType) -> Option<&'a soundfont::data::Generator> {
     zones.iter().map(|x| x.gen_list.iter()).flatten().find(|g| g.ty == ty)
 }
 pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInfo>, prgi_pointer_table: &mut PointerTable<ProgramInfo>, mut map_samples: impl FnMut(u16) -> Option<u16>, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_instruments: impl FnMut(usize, &Preset, Option<&Zone>, usize, &Zone, u16, &Instrument) -> bool, mut map_presets: impl FnMut(usize, &Preset, &ProgramInfo) -> Option<u16>) {
@@ -238,7 +190,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
             let fill_env_from_additive_source = |param: &mut Option<i16>, gen_ty: soundfont::data::GeneratorType| {
                 if let None = param {
                     *param = additive.map_or(None,
-                        |additive_source_zones| find_in_zones(
+                        |additive_source_zones| find_gen_in_zones(
                             additive_source_zones,
                             gen_ty
                         ).map(|g| *g.amount.as_i16().unwrap()));
@@ -267,7 +219,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::ReverbEffectsSend => {  },
                     soundfont::data::GeneratorType::Pan => {
                         split_entry.smplpan = map_range((-500.0, 500.0), (0.0, 127.0), (
-                            *gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::Pan).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }
+                            *gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::Pan).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }
                         ) as f64).round() as i8;
                     },
                     soundfont::data::GeneratorType::Unused2 => {  },
@@ -311,7 +263,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                         }
                     },
                     soundfont::data::GeneratorType::SustainVolEnv => {
-                        let decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::SustainVolEnv).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                        let decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::SustainVolEnv).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
                         split_entry.volume_envelope.sustain = (gain(decibels) * 127.0).round() as i8;
                     },
                     soundfont::data::GeneratorType::ReleaseVolEnv => {
@@ -328,7 +280,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::Reserved1 => {  },
                     soundfont::data::GeneratorType::KeyRange => {
                         if let Some(additive_source_zones) = additive {
-                            if let Some(base_key_range_gen) = find_in_zones(additive_source_zones, soundfont::data::GeneratorType::KeyRange) {
+                            if let Some(base_key_range_gen) = find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::KeyRange) {
                                 let base_key_range_value = base_key_range_gen.amount.as_range().unwrap();
                                 let limiting_key_range_value = gen.amount.as_range().unwrap();
                                 split_entry.lowkey = (base_key_range_value.low as i8).max(limiting_key_range_value.low as i8);
@@ -346,7 +298,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     },
                     soundfont::data::GeneratorType::VelRange => {
                         if let Some(additive_source_zones) = additive {
-                            if let Some(base_vel_range_gen) = find_in_zones(additive_source_zones, soundfont::data::GeneratorType::VelRange) {
+                            if let Some(base_vel_range_gen) = find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::VelRange) {
                                 let base_vel_range_value = base_vel_range_gen.amount.as_range().unwrap();
                                 let limiting_vel_range_value = gen.amount.as_range().unwrap();
                                 split_entry.lovel = (base_vel_range_value.low as i8).max(limiting_vel_range_value.low as i8);
@@ -366,7 +318,7 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                     soundfont::data::GeneratorType::Keynum => {  },
                     soundfont::data::GeneratorType::Velocity => {  },
                     soundfont::data::GeneratorType::InitialAttenuation => {
-                        let mut decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
+                        let mut decibels = -(gen.amount.as_i16().unwrap() + if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::InitialAttenuation).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 }) as f64 / 10.0_f64;
                         // Every 1dB of attenuation specified should attenuate by 0.4dB
                         // See https://www.polyphone-soundfonts.com/forum/soundfonts-help/29-understanding-attenuation for more information
                         decibels *= 0.4;
@@ -378,18 +330,18 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
                         let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
                         let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
                         tuning.add_semitones(*gen.amount.as_i16().unwrap() as i64);
-                        tuning.add_semitones(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
-                        tuning.add_cents(find_in_zones(&[&zone], soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
-                        tuning.add_cents(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        tuning.add_semitones(if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        tuning.add_cents(find_gen_in_zones(&[&zone], soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
+                        tuning.add_cents(if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
                         split_entry.tuning = tuning;
                     },
                     soundfont::data::GeneratorType::FineTune => {
                         let smpl = sample_infos.get(&map_samples(sample_i).unwrap()).ok_or(DSEError::_SampleInPresetMissing(map_samples(sample_i).unwrap())).unwrap();
                         let mut tuning = sample_rate_adjustment(smpl.smplrate as f64, sample_rate_adjustment_curve, pitch_adjust).unwrap();
-                        tuning.add_semitones(find_in_zones(&[&zone], soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
-                        tuning.add_semitones(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        tuning.add_semitones(find_gen_in_zones(&[&zone], soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) as i64);
+                        tuning.add_semitones(if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::CoarseTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
                         tuning.add_cents(*gen.amount.as_i16().unwrap() as i64);
-                        tuning.add_cents(if let Some(additive_source_zones) = additive { find_in_zones(additive_source_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
+                        tuning.add_cents(if let Some(additive_source_zones) = additive { find_gen_in_zones(additive_source_zones, soundfont::data::GeneratorType::FineTune).map(|g| *g.amount.as_i16().unwrap()).unwrap_or(0) } else { 0 } as i64);
                         split_entry.tuning = tuning;
                     },
                     soundfont::data::GeneratorType::SampleID => {
@@ -548,6 +500,23 @@ pub fn copy_presets(sf2: &SoundFont2, sample_infos: &mut BTreeMap<u16, SampleInf
             prgi_pointer_table.objects.push(program_info);
         }
     }
+}
+
+pub fn find_preset_in_soundfont(soundfont: &SoundFont2, bank: u16, program: u16) -> Option<usize> {
+    for (i, preset) in soundfont.presets.iter().enumerate() {
+        if preset.header.bank == bank && preset.header.preset == program {
+            return Some(i);
+        }
+    }
+    return None;
+}
+pub fn find_preset_in_soundfonts<'a>(soundfonts: &'a [&SoundFont2], bank: u16, program: u16) -> Option<(usize, usize)> {
+    for (soundfont_i, soundfont) in soundfonts.iter().enumerate() {
+        if let Some(preset_i) = find_preset_in_soundfont(soundfont, bank, program) {
+            return Some((soundfont_i, preset_i));
+        }
+    }
+    return None;
 }
 
 pub fn sample_rate_adjustment_in_cents(sample_rate: f64) -> f64 {

@@ -8,17 +8,57 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, command, Subcommand};
-use dse::swdl::sf2::{copy_raw_sample_data, copy_presets, DSPOptions, SongBuilderFlags};
-use dse::swdl::{SWDL, PRGIChunk, KGRPChunk, Keygroup, create_swdl_shell};
+use dse::swdl::sf2::{copy_raw_sample_data, copy_presets, DSPOptions};
+use dse::swdl::{SWDL, PRGIChunk, KGRPChunk, Keygroup, create_swdl_shell, SongBuilderFlags};
 use dse::dtype::DSEError;
 
-#[path = "../fileutils.rs"]
-mod fileutils;
-use fileutils::{VERSION, valid_file_of_type};
 use soundfont::SoundFont2;
-use fileutils::{get_final_output_folder, get_input_output_pairs, open_file_overwrite_rw, get_file_last_modified_date_with_default};
+
+use dse::fileutils::{valid_file_of_type, open_file_overwrite_rw, get_file_last_modified_date_with_default};
 
 use colored::Colorize;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn get_input_output_pairs(input_glob: &str, source_file_format: &str, output_folder: &PathBuf, change_ext: &str) -> Result<Vec<(PathBuf, PathBuf)>, DSEError> {
+    Ok(glob::glob(input_glob)?.into_iter().filter_map(|entry| {
+        match entry {
+            Ok(path) => {
+                if !valid_file_of_type(&path, source_file_format) {
+                    println!("Skipping {}!", path.display());
+                    None
+                } else {
+                    if let Some(input_file_name) = path.file_name() {
+                        let mut output_path = output_folder.clone();
+                        PathBuf::push(&mut output_path, input_file_name);
+                        output_path.set_extension(change_ext);
+                        Some((path, output_path))
+                    } else {
+                        None
+                    }
+                }
+            },
+            Err(e) => {
+                println!("{:?}", e);
+                None
+            }
+        }
+    }).collect())
+}
+
+pub fn get_final_output_folder(_output_folder: &Option<PathBuf>) -> Result<PathBuf, DSEError> {
+    let output_folder;
+    if let Some(custom_output_folder) = _output_folder {
+        if std::fs::metadata(&custom_output_folder)?.is_dir() {
+            output_folder = custom_output_folder.clone();
+        } else {
+            return Err(DSEError::Invalid("Output path must be a folder!".to_string()));
+        }
+    } else {
+        output_folder = std::env::current_dir()?;
+    }
+    Ok(output_folder)
+}
 
 #[derive(Parser)]
 #[command(author = "Adakite", version = VERSION, about = "Tools for working with SWDL and SWDL.XML files", long_about = None)]

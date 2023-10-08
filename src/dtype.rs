@@ -1,5 +1,5 @@
 use core::panic;
-use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, ops::RangeInclusive};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
 use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive, CheckedSub, FromPrimitive};
@@ -85,7 +85,7 @@ pub enum DSEError {
     InvalidDSECommandUnknownType(String, String, String),
     #[error("Couldn't convert filename for {0} file with path '{1}' into a UTF-8 Rust String. Filenames should be pure-ASCII only!")]
     DSEFileNameConversionNonUTF8(String, String),
-    #[error("Couldn't convert filename for {0} file with path '{1}' into an ASCII string. Filenames should be pure-ASCII only!")]
+    #[error("Couldn't convert song name '{1}' into an ASCII string for setting {0} metadata! Song names should be pure-ASCII only!")]
     DSEFileNameConversionNonASCII(String, String),
     #[error("Cannot create `DSEString` from the provided value '{0}'! String contains non-ASCII characters!")]
     DSEStringConversionNonASCII(String),
@@ -101,6 +101,10 @@ pub enum DSEError {
     DSESequencialSmfUnsupported(),
     #[error("MIDI contains too many tracks to be converted to the Smf0 format!")]
     DSESmf0TooManyTracks(),
+    #[error("Invalid used voice channels range {0:?}! Range must be bounded inside [0, 15], with the vchigh optionally being -1, interpreted as the max 15.")]
+    DSEUsedVoiceChannelsRangeOutOfBounds(RangeInclusive<i8>),
+    #[error("Invalid used voice channels range {0:?}! The range end must be greater than or equal to the range start!")]
+    DSEUsedVoiceChannelsRangeFlipped(RangeInclusive<i8>),
     #[error("Table<T> write_to_file: Self-index of object {0} is {0}. The self-index of an object in a table must match its actual index in the table!!")]
     TableNonMatchingSelfIndex(usize, usize),
     #[error("PointerTable<T> write_to_file: The self-index of an object in a pointer table must be unique!!")]

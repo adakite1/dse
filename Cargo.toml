@@ -23,3 +23,4 @@ soundfont = "0.0.2"
 dse-dsp-sys = { git = "https://github.com/adakite1/dse-dsp-sys.git" }
 strum = { version = "0.25", features = ["derive"] }
 bitflags = { version = "2.4.0", features = ["serde"] }
+indexmap = "2.0.2"
