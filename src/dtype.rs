@@ -1,8 +1,8 @@
 use core::panic;
-use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, ops::RangeInclusive};
+use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, ops::{RangeInclusive, Sub, Add}, marker::PhantomData};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
-use num_traits::{Zero, AsPrimitive};
+use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive, CheckedSub, FromPrimitive};
 use serde::{Serialize, Deserialize};
 
 use crate::{swdl::{ADSRVolumeEnvelope, DSEString, Tuning, SWDLHeader, SWDL}, smdl::{SMDLHeader, SMDL}};
@@ -23,6 +23,8 @@ bitflags! {
         const PRGI_POINTER_EXTENSION = 0b00000010;
         /// A combination of `WAVI_POINTER_EXTENSION` and `PRGI_POINTER_EXTENSION`.
         const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
+        /// This file uses streamed samples.
+        const STREAMED_SAMPLES = 0b00000100;
     }
 }
 //UNUSED BUT KEPT (Since these flags are not part of DSE itself, but an addition)
@@ -546,6 +548,7 @@ pub trait Pointer<O: ByteOrder>: AsPrimitive<u64> + TryFrom<usize> + Eq + Zero {
     fn write_as_bytes(self, buf: &mut [u8]);
     fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error>;
     fn use_magic() -> Option<Self>;
+    fn should_write_pointer<T: ReadWrite + Default + IsSelfIndexed + Serialize>(i: usize, val: &T) -> bool;
 }
 impl<O: ByteOrder> Pointer<O> for u16 {
     fn pointer_size() -> usize {
@@ -565,6 +568,9 @@ impl<O: ByteOrder> Pointer<O> for u16 {
     }
     fn use_magic() -> Option<u16> {
         None
+    }
+    fn should_write_pointer<T: ReadWrite + Default + IsSelfIndexed + Serialize>(_: usize, _: &T) -> bool {
+        true
     }
 }
 impl<O: ByteOrder> Pointer<O> for u32 {
@@ -586,7 +592,98 @@ impl<O: ByteOrder> Pointer<O> for u32 {
     fn use_magic() -> Option<u32> {
         Some(u32::MAX)
     }
+    fn should_write_pointer<T: ReadWrite + Default + IsSelfIndexed + Serialize>(_: usize, _: &T) -> bool {
+        true
+    }
 }
+
+#[derive(Clone, Copy)]
+pub struct Empty<T: Pointer<LittleEndian>> {
+    is_magic: bool,
+    t: T
+}
+impl<T: Pointer<LittleEndian>> Add for Empty<T> {
+    type Output = Empty<T>;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            is_magic: false,
+            t: self.t + rhs.t
+        }
+    }
+}
+impl<T: Pointer<LittleEndian>> Zero for Empty<T> {
+    fn zero() -> Self {
+        Empty { is_magic: false, t: T::zero() }
+    }
+    fn is_zero(&self) -> bool {
+        self.t == T::zero()
+    }
+}
+impl<T: Pointer<LittleEndian>> PartialEq for Empty<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.t == other.t
+    }
+}
+impl<T: Pointer<LittleEndian>> Eq for Empty<T> {  }
+impl<T: Pointer<LittleEndian>> AsPrimitive<u64> for Empty<T> {
+    fn as_(self) -> u64 {
+        self.t.as_()
+    }
+}
+impl<T: Pointer<LittleEndian>> TryFrom<usize> for Empty<T> {
+    type Error = T::Error;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        T::try_from(value).map(|x| Self {
+            is_magic: false,
+            t: x
+        })
+    }
+}
+impl<O: ByteOrder, T: Pointer<LittleEndian>> Pointer<O> for Empty<T> {
+    fn pointer_size() -> usize {
+        T::pointer_size()
+    }
+    fn read_from_bytes(buf: &[u8]) -> Self {
+        Self {
+            is_magic: false,
+            t: T::read_from_bytes(buf)
+        }
+    }
+    fn read<R: Read>(reader: &mut R) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            is_magic: false,
+            t: T::read(reader)?
+        })
+    }
+    fn write_as_bytes(self, buf: &mut [u8]) {
+        self.t.write_as_bytes(buf);
+        // if self.is_magic {
+        //     self.t.write_as_bytes(buf);
+        // } else {
+        //     T::write_as_bytes(T::zero(), buf);
+        // }
+    }
+    fn write<W: Write>(self, writer: &mut W) -> Result<(), std::io::Error> {
+        self.t.write(writer)
+        // if self.is_magic {
+        //     self.t.write(writer)
+        // } else {
+        //     T::write(T::zero(), writer)
+        // }
+    }
+    fn use_magic() -> Option<Self> {
+        T::use_magic().map(|x| Self {
+            is_magic: true,
+            t: x
+        })
+    }
+    fn should_write_pointer<U: ReadWrite + Default + IsSelfIndexed + Serialize>(i: usize, _: &U) -> bool {
+        false
+    }
+}
+
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
         let bytes_per_pointer = P::pointer_size();
@@ -606,15 +703,17 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
             writer.seek(SeekFrom::Start(pointer_table_start))?;
             magic.write(writer)?;
         }
-        for (i, val) in self.objects.iter().enumerate() {
-            let i = val.is_self_indexed().unwrap_or(i) + P::use_magic().is_some() as usize;
+        for (_internal_i, val) in self.objects.iter().enumerate() {
+            let i = val.is_self_indexed().unwrap_or(_internal_i) + P::use_magic().is_some() as usize;
             writer.seek(SeekFrom::Start(pointer_table_start + i as u64 * bytes_per_pointer as u64))?;
             if P::read(writer)? == P::zero() {
                 // Pointer has not been written in yet
                 writer.seek(SeekFrom::Current(-(bytes_per_pointer as i64)))?;
-                println!("{} pointer", first_pointer + accumulated_write);
-                let p: P = (first_pointer + accumulated_write).try_into().map_err(|_| DSEError::Placeholder())?;
-                p.write(writer)?;
+                if P::should_write_pointer(_internal_i, val) {
+                    println!("{} pointer", first_pointer + accumulated_write);
+                    let p: P = (first_pointer + accumulated_write).try_into().map_err(|_| DSEError::Placeholder())?;
+                    p.write(writer)?;
+                }
             } else {
                 // Overlapping pointers!
                 return Err(DSEError::PointerTableDuplicateSelfIndex())

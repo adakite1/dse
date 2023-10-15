@@ -90,14 +90,14 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                     midly::MidiMessage::NoteOn { key, vel } => {
                         trks[channel_i].fix_current_global_tick(global_tick)?;
                         if vel == 0 {
-                            trks[channel_i].note_off(key.as_int())?
+                            trks[channel_i].note_off(key.as_int(), vel.as_int())?
                         } else {
                             trks[channel_i].note_on(key.as_int(), vel.as_int())?
                         }
                     },
-                    midly::MidiMessage::NoteOff { key, vel: _ } => {
+                    midly::MidiMessage::NoteOff { key, vel } => {
                         trks[channel_i].fix_current_global_tick(global_tick)?;
-                        trks[channel_i].note_off(key.as_int())?
+                        trks[channel_i].note_off(key.as_int(), vel.as_int())?
                     },
                     midly::MidiMessage::Aftertouch { key, vel } => { /* Ignore aftertouch events */ },
                     midly::MidiMessage::Controller { controller, value } => {
@@ -399,7 +399,7 @@ pub struct TrkChunkWriter {
     chanid: u8,
     current_global_tick: u128,
     trk_events: Vec<(bool, DSEEvent)>,
-    notes_held: HashMap<u8, (usize, u128)>,
+    notes_held: HashMap<(u8, u8), (usize, u128)>,
     bank: u8,
     program: u8,
     programs_used: Vec<ProgramUsed>,
@@ -471,9 +471,9 @@ impl TrkChunkWriter {
         }
     }
     pub fn note_on(&mut self, key: u8, vel: u8) -> Result<(), DSEError> {
-        if self.notes_held.contains_key(&key) {
-            println!("{}Overlapping notes detected! By default when there's note overlap a noteoff is sent immediately to avoid them.", "Warning: ".yellow());
-            self.note_off(key)?;
+        if self.notes_held.contains_key(&(key, vel)) {
+            println!("{}Overlapping notes with same velocities detected! By default when there's note overlap a noteoff is sent immediately to avoid them.", "Warning: ".yellow());
+            self.note_off(key, vel)?;
         }
         self.add_other_with_params_u8("SetTrackOctave", key / 12)?; // AN EXTRA OCTAVE IS NOT LONGER ADDED BY DEFAULT SO THAT CUSTOM SOUND BANKS WORK CORRECTLY
         let mut evt = PlayNote::default();
@@ -481,17 +481,17 @@ impl TrkChunkWriter {
         evt.octavemod = 2;
         evt.note = key % 12;
         let note_on_evt_index = self.add(DSEEvent::PlayNote(evt));
-        self.notes_held.insert(key, (note_on_evt_index, self.current_global_tick));
+        self.notes_held.insert((key, vel), (note_on_evt_index, self.current_global_tick));
         if let Some(program_used) = self.programs_used.last_mut() {
             program_used.notes.entry(key).or_insert(BTreeSet::new()).insert(vel);
         }
         Ok(())
     }
-    pub fn note_off(&mut self, key: u8) -> Result<(), DSEError> {
-        if !self.notes_held.contains_key(&key) {
+    pub fn note_off(&mut self, key: u8, vel: u8) -> Result<(), DSEError> {
+        if !self.notes_held.contains_key(&(key, vel)) {
             return Ok(());
         }
-        let (index, past_global_tick) = self.notes_held.remove(&key).ok_or(DSEError::_ValidHashMapKeyRemovalFailed())?;
+        let (index, past_global_tick) = self.notes_held.remove(&(key, vel)).ok_or(DSEError::_ValidHashMapKeyRemovalFailed())?;
         if let Ok(delta) = u32::try_from(self.current_global_tick - past_global_tick) {
             if let Some(delta) = u24::try_from(delta) {
                 if let Some((_, DSEEvent::PlayNote(evt))) = self.trk_events.get_mut(index) {
