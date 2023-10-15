@@ -2,14 +2,87 @@ use core::panic;
 use std::{io::{Read, Write, Seek, SeekFrom, Cursor}, fmt::{Display, Debug}, vec, ops::RangeInclusive};
 use bevy_reflect::{Reflect, Struct};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian, ByteOrder};
-use num_traits::{Unsigned, FromBytes, ToBytes, PrimInt, Zero, AsPrimitive, CheckedSub, FromPrimitive};
+use num_traits::{Zero, AsPrimitive};
 use serde::{Serialize, Deserialize};
 
-use crate::swdl::{ADSRVolumeEnvelope, DSEString, Tuning};
+use crate::{swdl::{ADSRVolumeEnvelope, DSEString, Tuning, SWDLHeader, SWDL}, smdl::{SMDLHeader, SMDL}};
 
 use thiserror::Error;
 
 use strum::Display;
+
+use bitflags::bitflags;
+
+bitflags! {
+    /// Although mostly unused within this crate, these bitflags are provided as a standard way to utilize the `unk18` value within the SWDL header.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    pub struct SongBuilderFlags: u32 {
+        /// The WAVI chunk's pointers are extended to use 32-bit unsigned integers.
+        const WAVI_POINTER_EXTENSION = 0b00000001;
+        /// The PRGI chunk's pointers are extended to use 32-bit unsigned integers.
+        const PRGI_POINTER_EXTENSION = 0b00000010;
+        /// A combination of `WAVI_POINTER_EXTENSION` and `PRGI_POINTER_EXTENSION`.
+        const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
+    }
+}
+//UNUSED BUT KEPT (Since these flags are not part of DSE itself, but an addition)
+// impl ReadWrite for SongBuilderFlags {
+//     fn write_to_file<W: Read + std::io::Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
+//         writer.write_u32::<LittleEndian>(self.bits())?;
+//         Ok(4)
+//     }
+//     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
+//         *self = Self::from_bits_retain(reader.read_u32::<LittleEndian>()?);
+//         Ok(())
+//     }
+// }
+impl SongBuilderFlags {
+    pub fn parse_from_swdl_file<R: Read + Seek>(reader: &mut R) -> Result<SongBuilderFlags, DSEError> {
+        let previous_seek_pos = reader.seek(SeekFrom::Current(0))?;
+        
+        let mut swdl_header = SWDLHeader::default();
+        swdl_header.read_from_file(reader)?;
+
+        reader.seek(SeekFrom::Start(previous_seek_pos))?;
+        Ok(Self::from_bits_retain(swdl_header.unk18))
+    }
+    pub fn parse_from_swdl(swdl: &SWDL) -> SongBuilderFlags {
+        Self::from_bits_retain(swdl.header.unk18)
+    }
+
+    pub fn parse_from_smdl_file<R: Read + Seek>(reader: &mut R) -> Result<SongBuilderFlags, DSEError> {
+        let previous_seek_pos = reader.seek(SeekFrom::Current(0))?;
+        
+        let mut smdl_header = SMDLHeader::default();
+        smdl_header.read_from_file(reader)?;
+
+        reader.seek(SeekFrom::Start(previous_seek_pos))?;
+        Ok(Self::from_bits_retain(smdl_header.unk7))
+    }
+    pub fn parse_from_smdl(smdl: &SMDL) -> SongBuilderFlags {
+        Self::from_bits_retain(smdl.header.unk7)
+    }
+}
+pub trait SetSongBuilderFlags {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags;
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags);
+}
+impl SetSongBuilderFlags for SWDL {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags {
+        SongBuilderFlags::from_bits_retain(self.header.unk18)
+    }
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags) {
+        self.header.unk18 = flags.bits();
+    }
+}
+impl SetSongBuilderFlags for SMDL {
+    fn get_song_builder_flags(&self) -> SongBuilderFlags {
+        SongBuilderFlags::from_bits_retain(self.header.unk7)
+    }
+    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags) {
+        self.header.unk7 = flags.bits();
+    }
+}
 
 #[derive(Debug, Display)]
 pub enum DSEFileType {
@@ -466,7 +539,8 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         }
     }
 }
-pub trait Pointer<O: ByteOrder>: Unsigned + AsPrimitive<u64> + FromPrimitive + TryFrom<usize> + FromBytes + ToBytes + PrimInt + Eq + Zero + CheckedSub {
+pub trait Pointer<O: ByteOrder>: AsPrimitive<u64> + TryFrom<usize> + Eq + Zero {
+    fn pointer_size() -> usize;
     fn read_from_bytes(buf: &[u8]) -> Self;
     fn read<R: Read>(reader: &mut R) -> Result<Self, std::io::Error>;
     fn write_as_bytes(self, buf: &mut [u8]);
@@ -474,6 +548,9 @@ pub trait Pointer<O: ByteOrder>: Unsigned + AsPrimitive<u64> + FromPrimitive + T
     fn use_magic() -> Option<Self>;
 }
 impl<O: ByteOrder> Pointer<O> for u16 {
+    fn pointer_size() -> usize {
+        std::mem::size_of::<u16>()
+    }
     fn read_from_bytes(buf: &[u8]) -> u16 {
         O::read_u16(buf)
     }
@@ -491,6 +568,9 @@ impl<O: ByteOrder> Pointer<O> for u16 {
     }
 }
 impl<O: ByteOrder> Pointer<O> for u32 {
+    fn pointer_size() -> usize {
+        std::mem::size_of::<u32>()
+    }
     fn read_from_bytes(buf: &[u8]) -> u32 {
         O::read_u32(buf)
     }
@@ -509,7 +589,7 @@ impl<O: ByteOrder> Pointer<O> for u32 {
 }
 impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
     pub fn write_to_file<P: Pointer<LittleEndian>, W: Read + Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-        let bytes_per_pointer = std::mem::size_of::<P>();
+        let bytes_per_pointer = P::pointer_size();
         let pointer_table_byte_len = if P::use_magic().is_some() {
             (self.slots() + 1) * bytes_per_pointer
         } else {
@@ -551,7 +631,7 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         Ok(pointer_table_byte_len_aligned + accumulated_object_data.len())
     }
     pub fn read_from_file<P: Pointer<LittleEndian>, R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
-        let bytes_per_pointer = std::mem::size_of::<P>();
+        let bytes_per_pointer = P::pointer_size();
         let start_of_pointer_table = reader.seek(SeekFrom::Current(0))?;
         if P::use_magic().is_some() {
             reader.seek(SeekFrom::Current(bytes_per_pointer as i64))?;

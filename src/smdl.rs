@@ -1,9 +1,13 @@
 use core::panic;
+use std::fmt::Debug;
+use std::fs::File;
 use std::io::{Read, Write, Seek, SeekFrom, Cursor};
+use std::path::Path;
 use bevy_reflect::Reflect;
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use serde::{Serialize, Deserialize};
 
+use crate::fileutils::valid_file_of_type;
 use crate::swdl::DSEString;
 use crate::peek_byte;
 use crate::dtype::*;
@@ -269,7 +273,7 @@ pub mod events {
             (&mut keydownduration[..]).write_u32::<BigEndian>(self.keydownduration)?;
 
             let keydowndurationlen = match self.keydownduration {
-                0x0 => 0,
+                0x0 => 1, // If this is set to zero, meaning zero bytes of keydownduration are written, the game's code will actually use the previous keydownduration, so to actually do zero note duration, one byte is necessary.
                 0x1..=0xFF => 1,
                 0x100..=0xFFFF => 2,
                 0x10000..=0xFFFFFF => 3,
@@ -750,6 +754,49 @@ impl ReadWrite for SMDL {
         self.trks.set_read_params(self.song.nbtrks as usize);
         self.trks.read_from_file(reader)?;
         self.eoc.read_from_file(reader)?;
+        Ok(())
+    }
+}
+impl SMDL {
+    pub fn load<R: Read + Seek>(file: &mut R) -> Result<SMDL, DSEError> {
+        let mut smdl = SMDL::default();
+        smdl.read_from_file(file)?;
+        Ok(smdl)
+    }
+    pub fn load_xml<R: Read + Seek>(file: &mut R) -> Result<SMDL, DSEError> {
+        let mut st = String::new();
+        file.read_to_string(&mut st)?;
+        let mut smdl = quick_xml::de::from_str::<SMDL>(&st)?;
+        smdl.regenerate_read_markers()?;
+        Ok(smdl)
+    }
+    pub fn load_path<P: AsRef<Path> + Debug>(path: P) -> Result<SMDL, DSEError> {
+        let smdl;
+        if valid_file_of_type(&path, "smd") {
+            println!("[*] Opening smd {:?}", &path);
+            smdl = SMDL::load(&mut File::open(path)?)?;
+        } else if valid_file_of_type(&path, "xml") {
+            println!("[*] Opening smd {:?} (xml)", &path);
+            smdl = SMDL::load_xml(&mut File::open(path)?)?;
+        } else {
+            return Err(DSEError::Invalid(format!("File '{:?}' is not an SMD file!", path)));
+        }
+        Ok(smdl)
+    }
+    pub fn save<W: Read + Write + Seek>(&mut self, file: &mut W, flags: Option<SongBuilderFlags>) -> Result<(), DSEError> {
+        if let Some(flags) = flags {
+            self.set_song_builder_flags(flags);
+        }
+        self.regenerate_read_markers()?;
+        self.write_to_file(file)?;
+        Ok(())
+    }
+    pub fn save_xml<W: Read + Write + Seek>(&mut self, file: &mut W, flags: Option<SongBuilderFlags>) -> Result<(), DSEError> {
+        if let Some(flags) = flags {
+            self.set_song_builder_flags(flags);
+        }
+        let st = quick_xml::se::to_string(&self)?;
+        file.write_all(st.as_bytes())?;
         Ok(())
     }
 }

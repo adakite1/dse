@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, command, Subcommand};
 use dse::swdl::sf2::{copy_raw_sample_data, copy_presets, DSPOptions};
-use dse::swdl::{SWDL, PRGIChunk, KGRPChunk, Keygroup, create_swdl_shell, SongBuilderFlags};
-use dse::dtype::DSEError;
+use dse::swdl::{SWDL, PRGIChunk, KGRPChunk, Keygroup, create_swdl_shell};
+use dse::dtype::{DSEError, SongBuilderFlags};
 
 use soundfont::SoundFont2;
 

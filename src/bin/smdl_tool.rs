@@ -11,9 +11,8 @@ use colored::Colorize;
 use dse::smdl::midi::{open_midi, get_midi_tpb, get_midi_messages_flattened, TrkChunkWriter, copy_midi_messages};
 use dse::smdl::create_smdl_shell;
 use dse::swdl::ProgramInfo;
-use dse::swdl::SongBuilderFlags;
 use dse::{smdl::SMDL, swdl::SWDL};
-use dse::dtype::{ReadWrite, DSEError, DSELinkBytes};
+use dse::dtype::{ReadWrite, DSEError, DSELinkBytes, SongBuilderFlags};
 
 use dse::fileutils::{open_file_overwrite_rw, valid_file_of_type, get_file_last_modified_date_with_default};
 

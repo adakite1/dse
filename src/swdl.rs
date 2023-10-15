@@ -15,8 +15,6 @@ use crate::fileutils::valid_file_of_type;
 
 pub mod sf2;
 
-use bitflags::bitflags;
-
 /// By default, all unknown bytes that do not have a consistent pattern of values in the EoS roms are included in the XML.
 /// However, a subset of these not 100% purpose-certain bytes is 80% or something of values that have "typical" values.
 /// Setting this to true will strip all those somewhat certain bytes from the Serde serialization process, and replace them
@@ -190,56 +188,6 @@ impl Default for SWDLHeader {
     }
 }
 impl AutoReadWrite for SWDLHeader {  }
-
-bitflags! {
-    /// Although mostly unused within this crate, these bitflags are provided as a standard way to utilize the `unk18` value within the SWDL header.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-    pub struct SongBuilderFlags: u32 {
-        /// The WAVI chunk's pointers are extended to use 32-bit unsigned integers.
-        const WAVI_POINTER_EXTENSION = 0b00000001;
-        ///UNUSED!!!
-        const PRGI_POINTER_EXTENSION = 0b00000010;
-        ///UNUSED!!!
-        const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
-    }
-}
-//UNUSED BUT KEPT (Since these flags are not part of DSE itself, but an addition)
-// impl ReadWrite for SongBuilderFlags {
-//     fn write_to_file<W: Read + std::io::Write + Seek>(&self, writer: &mut W) -> Result<usize, DSEError> {
-//         writer.write_u32::<LittleEndian>(self.bits())?;
-//         Ok(4)
-//     }
-//     fn read_from_file<R: Read + Seek>(&mut self, reader: &mut R) -> Result<(), DSEError> {
-//         *self = Self::from_bits_retain(reader.read_u32::<LittleEndian>()?);
-//         Ok(())
-//     }
-// }
-impl SongBuilderFlags {
-    pub fn parse_from_swdl_file<R: Read + Seek>(reader: &mut R) -> Result<SongBuilderFlags, DSEError> {
-        let previous_seek_pos = reader.seek(SeekFrom::Current(0))?;
-        
-        let mut swdl_header = SWDLHeader::default();
-        swdl_header.read_from_file(reader)?;
-
-        reader.seek(SeekFrom::Start(previous_seek_pos))?;
-        Ok(Self::from_bits_retain(swdl_header.unk18))
-    }
-    pub fn parse_from_swdl(swdl: &SWDL) -> SongBuilderFlags {
-        Self::from_bits_retain(swdl.header.unk18)
-    }
-}
-pub trait SetSongBuilderFlags {
-    fn get_song_builder_flags(&self) -> SongBuilderFlags;
-    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags);
-}
-impl SetSongBuilderFlags for SWDL {
-    fn get_song_builder_flags(&self) -> SongBuilderFlags {
-        SongBuilderFlags::from_bits_retain(self.header.unk18)
-    }
-    fn set_song_builder_flags(&mut self, flags: SongBuilderFlags) {
-        self.header.unk18 = flags.bits();
-    }
-}
 
 #[derive(Debug, Clone, Reflect, Serialize, Deserialize)]
 pub struct ChunkHeader {
@@ -1298,8 +1246,11 @@ impl SWDL {
         }
         Ok(swdl)
     }
-    pub fn save<W: Read + Write + Seek>(&mut self, file: &mut W, flags: SongBuilderFlags) -> Result<(), DSEError> {
-        self.set_song_builder_flags(flags);
+    pub fn save<W: Read + Write + Seek>(&mut self, file: &mut W, flags: Option<SongBuilderFlags>) -> Result<(), DSEError> {
+        if let Some(flags) = flags {
+            self.set_song_builder_flags(flags);
+        }
+        let flags = self.get_song_builder_flags();
         if flags.contains(SongBuilderFlags::FULL_POINTER_EXTENSION) {
             self.regenerate_read_markers::<u32, u32>()?;
             self.regenerate_automatic_parameters()?;
@@ -1317,6 +1268,14 @@ impl SWDL {
             self.regenerate_automatic_parameters()?;
             self.write_to_file::<u16, u16, _>(file)?;
         }
+        Ok(())
+    }
+    pub fn save_xml<W: Read + Write + Seek>(&mut self, file: &mut W, flags: Option<SongBuilderFlags>) -> Result<(), DSEError> {
+        if let Some(flags) = flags {
+            self.set_song_builder_flags(flags);
+        }
+        let st = quick_xml::se::to_string(&self)?;
+        file.write_all(st.as_bytes())?;
         Ok(())
     }
 }
