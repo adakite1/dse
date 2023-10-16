@@ -316,6 +316,9 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                         } else if capacity == 16 {
                             writer.write_all(field.as_any().downcast_ref::<[u8; 16]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
                             bytes_written += 16;
+                        } else if capacity == 32 {
+                            writer.write_all(field.as_any().downcast_ref::<[u8; 32]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())?)?;
+                            bytes_written += 32;
                         } else {
                             panic!("Unsupported auto type!");
                         }
@@ -383,6 +386,8 @@ impl<T: Reflect + Struct + Default + AutoReadWrite> ReadWrite for T {
                             *field.as_any_mut().downcast_mut::<[u8; 8]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 8)?;
                         } else if capacity == 16 {
                             *field.as_any_mut().downcast_mut::<[u8; 16]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 16)?;
+                        } else if capacity == 32 {
+                            *field.as_any_mut().downcast_mut::<[u8; 32]>().ok_or(DSEError::_ValidDynamicFieldDowncastFailed())? = read_n_bytes!(file, 32)?;
                         } else {
                             panic!("Unsupported auto type!");
                         }
