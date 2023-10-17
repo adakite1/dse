@@ -23,6 +23,8 @@ bitflags! {
         const PRGI_POINTER_EXTENSION = 0b00000010;
         /// A combination of `WAVI_POINTER_EXTENSION` and `PRGI_POINTER_EXTENSION`.
         const FULL_POINTER_EXTENSION = Self::WAVI_POINTER_EXTENSION.bits() | Self::PRGI_POINTER_EXTENSION.bits();
+        /// The SWD/SMD files are meant to be paired with snd_stream.
+        const SND_STREAM = 0b00000100;
     }
 }
 //UNUSED BUT KEPT (Since these flags are not part of DSE itself, but an addition)
@@ -600,7 +602,12 @@ impl<T: ReadWrite + Default + IsSelfIndexed + Serialize> PointerTable<T> {
         } else {
             self.slots() * bytes_per_pointer
         };
-        let pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
+        let pointer_table_byte_len_aligned;
+        if pointer_table_byte_len > 0 {
+            pointer_table_byte_len_aligned = ((pointer_table_byte_len - 1) | 15) + 1; // Round the length of the pointer table in bytes to the next multiple of 16
+        } else {
+            pointer_table_byte_len_aligned = 0; // Round the length of the pointer table in bytes to the next multiple of 16
+        }
         let first_pointer = pointer_table_byte_len_aligned;
         let mut accumulated_write = 0;
         let mut accumulated_object_data: Vec<u8> = Vec::new();
