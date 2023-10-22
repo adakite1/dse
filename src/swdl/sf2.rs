@@ -3,12 +3,11 @@ use std::io::{Seek, Cursor, Read};
 
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
 use colored::Colorize;
-use serde::{Serialize, Deserialize};
 use crate::math::{timecents_to_milliseconds, gain};
 use crate::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, ProgramInfo, SplitEntry, LFOEntry, PCMDChunk, Tuning};
-use crate::dtype::{DSEError, PointerTable, ReadWrite};
+use crate::dtype::{DSEError, PointerTable};
 
-use dse_dsp_sys::{process_mono_preserve_looping, SampleRateChoicePreference};
+use dse_dsp_sys::{process_mono_preserve_looping, SampleRateChoicePreference, init_deltas, block_alignment};
 use soundfont::data::{SampleHeader, GeneratorType};
 use soundfont::{SoundFont2, Zone, Preset, Instrument};
 
@@ -116,7 +115,7 @@ where
                     raw_sample_data_loop,
                     sample_header.sample_rate as f64,
                     new_sample_rate,
-                    dsp_options.adpcm_encoder_lookahead, 128, SampleRateChoicePreference::Higher,
+                    dsp_options.adpcm_encoder_lookahead, init_deltas::averaging, 128, block_alignment::To8Bytes(), SampleRateChoicePreference::Higher,
                     None);
                 new_sample_rate = new_sample_rate.round(); // Rounding is required since the smplrate value in DSE is u32
                 (resampled, tracking)
