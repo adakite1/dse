@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::{HashMap, BTreeSet, BTreeMap}, u8, hash::Hash, io::Write};
+use std::{borrow::Cow, collections::{HashMap, BTreeSet, BTreeMap}, u8, hash::Hash, io::Write, rc::Rc, cell::RefCell};
 
 use byteorder::{WriteBytesExt, LittleEndian, BigEndian, ByteOrder};
 use colored::Colorize;
@@ -75,7 +75,9 @@ pub fn get_midi_messages_flattened<'a>(smf: &'a Smf) -> Result<Cow<'a, [TrackEve
     }
 }
 
-pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &mut [TrkChunkWriter], mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<u128, DSEError> {
+pub fn copy_midi_messages<'a, MapProgram>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &mut [TrkChunkWriter], mut map_program: MapProgram) -> Result<u128, DSEError>
+where
+    MapProgram: FnMut(u8, u8, u8, bool, &mut TrkChunkWriter, Rc<RefCell<DSEEvent>>) -> Option<u8> {
     // Loop through all the events
     let mut global_tick = 0;
     for midi_msg in midi_messages.as_ref() {
@@ -408,8 +410,8 @@ pub struct TrkChunkWriter {
     trkid: u8,
     chanid: u8,
     current_global_tick: u128,
-    trk_events: Vec<(bool, DSEEvent)>,
-    notes_held: HashMap<u8, (usize, u128)>,
+    trk_events: Vec<Rc<RefCell<DSEEvent>>>,
+    notes_held: HashMap<u8, (Rc<RefCell<DSEEvent>>, u128)>,
     bank: u8,
     program: u8,
     programs_used: Vec<ProgramUsed>,
@@ -432,7 +434,9 @@ impl TrkChunkWriter {
     pub fn programs_used(&self) -> &Vec<ProgramUsed> {
         &self.programs_used
     }
-    pub fn bank_select(&mut self, bank: u8, is_default: bool, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
+    pub fn bank_select<MapProgram>(&mut self, bank: u8, is_default: bool, mut map_program: MapProgram) -> Result<Option<(Rc<RefCell<DSEEvent>>, usize)>, DSEError>
+    where
+        MapProgram: FnMut(u8, u8, u8, bool, &mut TrkChunkWriter, Rc<RefCell<DSEEvent>>) -> Option<u8> {
         self.bank = bank;
         let mut same_tick = false;
         if let &Some(last_program_change_global_tick) = &self.last_program_change_global_tick {
@@ -440,23 +444,25 @@ impl TrkChunkWriter {
                 self.programs_used.pop();
                 same_tick = true;
                 if let Some(last_program_change_event_index) = self.last_program_change_event_index {
-                    if let Some(last_program_change_event) = self.trk_events.get_mut(last_program_change_event_index) {
-                        last_program_change_event.0 = false;
-                    }
+                    self.trk_events.remove(last_program_change_event_index);
                 }
             }
         }
         self.programs_used.push(ProgramUsed::new(self.bank, self.program, is_default));
         self.last_program_change_global_tick = Some(self.current_global_tick);
-        if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self) {
-            self.last_program_change_event_index = Some(self.add_other_with_params_u8("SetProgram", program_id)?);
-            Ok(self.last_program_change_event_index)
+        let (last_program_change_event, last_program_change_event_index) = self.add_other_with_params_u8("SetProgram", 0)?; // Set to zero for now, change later
+        if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self, last_program_change_event.clone()) {
+            Self::set_other_with_params_u8(&mut *last_program_change_event.borrow_mut(), program_id)?; // Set program to mapped
+            self.last_program_change_event_index = Some(last_program_change_event_index);
+            Ok(Some((last_program_change_event, last_program_change_event_index)))
         } else {
             self.last_program_change_event_index = None;
             Ok(None)
         }
     }
-    pub fn program_change(&mut self, prgm: u8, is_default: bool, mut map_program: impl FnMut(u8, u8, u8, bool, &mut TrkChunkWriter) -> Option<u8>) -> Result<Option<usize>, DSEError> {
+    pub fn program_change<MapProgram>(&mut self, prgm: u8, is_default: bool, mut map_program: MapProgram) -> Result<Option<(Rc<RefCell<DSEEvent>>, usize)>, DSEError>
+    where
+        MapProgram: FnMut(u8, u8, u8, bool, &mut TrkChunkWriter, Rc<RefCell<DSEEvent>>) -> Option<u8> {
         self.program = prgm;
         let mut same_tick = false;
         if let &Some(last_program_change_global_tick) = &self.last_program_change_global_tick {
@@ -464,17 +470,17 @@ impl TrkChunkWriter {
                 self.programs_used.pop();
                 same_tick = true;
                 if let Some(last_program_change_event_index) = self.last_program_change_event_index {
-                    if let Some(last_program_change_event) = self.trk_events.get_mut(last_program_change_event_index) {
-                        last_program_change_event.0 = false;
-                    }
+                    self.trk_events.remove(last_program_change_event_index);
                 }
             }
         }
         self.programs_used.push(ProgramUsed::new(self.bank, self.program, is_default));
         self.last_program_change_global_tick = Some(self.current_global_tick);
-        if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self) {
-            self.last_program_change_event_index = Some(self.add_other_with_params_u8("SetProgram", program_id)?);
-            Ok(self.last_program_change_event_index)
+        let (last_program_change_event, last_program_change_event_index) = self.add_other_with_params_u8("SetProgram", 0)?; // Set to zero for now, change later
+        if let Some(program_id) = map_program(self.trkid, self.bank, self.program, same_tick, self, last_program_change_event.clone()) {
+            Self::set_other_with_params_u8(&mut *last_program_change_event.borrow_mut(), program_id)?; // Set program to mapped
+            self.last_program_change_event_index = Some(last_program_change_event_index);
+            Ok(Some((last_program_change_event, last_program_change_event_index)))
         } else {
             self.last_program_change_event_index = None;
             Ok(None)
@@ -490,8 +496,8 @@ impl TrkChunkWriter {
         evt.velocity = vel;
         evt.octavemod = 2;
         evt.note = key % 12;
-        let note_on_evt_index = self.add(DSEEvent::PlayNote(evt));
-        self.notes_held.insert(key, (note_on_evt_index, self.current_global_tick));
+        let (note_on_evt_clone, _) = self.add(DSEEvent::PlayNote(evt));
+        self.notes_held.insert(key, (note_on_evt_clone, self.current_global_tick));
         if let Some(program_used) = self.programs_used.last_mut() {
             program_used.notes.entry(key).or_insert(BTreeSet::new()).insert(vel);
         }
@@ -501,13 +507,11 @@ impl TrkChunkWriter {
         if !self.notes_held.contains_key(&key) {
             return Ok(());
         }
-        let (index, past_global_tick) = self.notes_held.remove(&key).ok_or(DSEError::_ValidHashMapKeyRemovalFailed())?;
+        let (note_on_event, past_global_tick) = self.notes_held.remove(&key).ok_or(DSEError::_ValidHashMapKeyRemovalFailed())?;
         if let Ok(delta) = u32::try_from(self.current_global_tick - past_global_tick) {
             if let Some(delta) = u24::try_from(delta) {
-                if let Some((_, DSEEvent::PlayNote(evt))) = self.trk_events.get_mut(index) {
+                if let DSEEvent::PlayNote(evt) = &mut *note_on_event.borrow_mut() {
                     evt.keydownduration = delta.as_int();
-                } else {
-                    return Err(DSEError::_CorrespondingNoteOnNotFound())
                 }
             } else {
                 return Err(DSEError::DSESmfNotesTooLong());
@@ -517,61 +521,65 @@ impl TrkChunkWriter {
         }
         Ok(())
     }
-    pub fn add_other_no_params(&mut self, name: &str) -> Result<usize, DSEError> {
+    pub fn add_other_no_params(&mut self, name: &str) -> Result<(Rc<RefCell<DSEEvent>>, usize), DSEError> {
         let mut evt = Other::default();
         evt.code = Other::name_to_code(name)?;
         Ok(self.add_other_event(evt))
     }
-    pub fn pop_virtual(&mut self) {
-        if let Some(e) = self.trk_events.last_mut() {
-            e.0 = false;
+    pub fn set_other_with_params_u8(event: &mut DSEEvent, val: u8) -> Result<(), DSEError> {
+        if let DSEEvent::Other(event) = event {
+            (&mut event.parameters[..]).write_u8(val)?;
+            Ok(())
+        } else {
+            Err(DSEError::_InvalidEventTypePassedToSetOtherWithParamsU8())
         }
     }
-    pub fn add_other_with_params_u8(&mut self, name: &str, val: u8) -> Result<usize, DSEError> {
+    pub fn add_other_with_params_u8(&mut self, name: &str, val: u8) -> Result<(Rc<RefCell<DSEEvent>>, usize), DSEError> {
         let mut evt = Other::default();
         evt.code = Other::name_to_code(name)?;
         (&mut evt.parameters[..]).write_u8(val)?;
         Ok(self.add_other_event(evt))
     }
-    pub fn add_other_with_params_i16<E: ByteOrder>(&mut self, name: &str, val: i16) -> Result<usize, DSEError> {
+    pub fn add_other_with_params_i16<E: ByteOrder>(&mut self, name: &str, val: i16) -> Result<(Rc<RefCell<DSEEvent>>, usize), DSEError> {
         let mut evt = Other::default();
         evt.code = Other::name_to_code(name)?;
         (&mut evt.parameters[..]).write_i16::<E>(val)?;
         Ok(self.add_other_event(evt))
     }
-    pub fn add_other_with_params_u16<E: ByteOrder>(&mut self, name: &str, val: u16) -> Result<usize, DSEError> {
+    pub fn add_other_with_params_u16<E: ByteOrder>(&mut self, name: &str, val: u16) -> Result<(Rc<RefCell<DSEEvent>>, usize), DSEError> {
         let mut evt = Other::default();
         evt.code = Other::name_to_code(name)?;
         (&mut evt.parameters[..]).write_u16::<E>(val)?;
         Ok(self.add_other_event(evt))
     }
-    pub fn add_swdl(&mut self, unk2: u8) -> Result<usize, DSEError> {
+    pub fn add_swdl(&mut self, unk2: u8) -> Result<(Rc<RefCell<DSEEvent>>, usize), DSEError> {
         self.add_other_with_params_u8("SetSwdl", unk2)
     }
-    pub fn add_bank(&mut self, unk1: u8) -> Result<usize, DSEError> {
+    pub fn add_bank(&mut self, unk1: u8) -> Result<(Rc<RefCell<DSEEvent>>, usize), DSEError> {
         self.add_other_with_params_u8("SetBank", unk1)
     }
-    pub fn next_event_index(&self) -> usize {
-        self.trk_events.len()
-    }
-    pub fn add(&mut self, event: DSEEvent) -> usize {
+    // pub fn next_event_index(&self) -> usize {
+    //     self.trk_events.len()
+    // }
+    pub fn add(&mut self, event: DSEEvent) -> (Rc<RefCell<DSEEvent>>, usize) {
         let new_event_index = self.trk_events.len();
-        self.trk_events.push((true, event));
-        new_event_index
+        let new_event = Rc::new(RefCell::new(event));
+        self.trk_events.push(new_event.clone());
+        (new_event, new_event_index)
     }
-    pub fn get_event(&mut self, index: usize) -> Option<&(bool, DSEEvent)> {
-        self.trk_events.get(index)
-    }
-    pub fn get_event_mut(&mut self, index: usize) -> Option<&mut (bool, DSEEvent)> {
-        self.trk_events.get_mut(index)
-    }
-    pub fn add_playnote_event(&mut self, playnote: PlayNote) -> usize {
+    // pub fn get_event_by_index(&mut self, index: usize) -> Option<&Rc<RefCell<DSEEvent>>> {
+    //     self.trk_events.get(index)
+    // }
+    // pub fn get_event_by_index_mut(&mut self, index: usize) -> Option<&mut Rc<RefCell<DSEEvent>>> {
+    //     self.trk_events.get_mut(index)
+    // }
+    pub fn add_playnote_event(&mut self, playnote: PlayNote) -> (Rc<RefCell<DSEEvent>>, usize) {
         self.add(DSEEvent::PlayNote(playnote))
     }
-    pub fn add_fixeddurationpause_event(&mut self, fixeddurationpause: FixedDurationPause) -> usize {
+    pub fn add_fixeddurationpause_event(&mut self, fixeddurationpause: FixedDurationPause) -> (Rc<RefCell<DSEEvent>>, usize) {
         self.add(DSEEvent::FixedDurationPause(fixeddurationpause))
     }
-    pub fn add_other_event(&mut self, other: Other) -> usize {
+    pub fn add_other_event(&mut self, other: Other) -> (Rc<RefCell<DSEEvent>>, usize) {
         self.add(DSEEvent::Other(other))
     }
     /// Fix the current global tick to match the entire song by adding new pause events
@@ -615,6 +623,8 @@ impl TrkChunkWriter {
     }
     /// Close the track by adding the end of track event
     pub fn close_track(mut self) -> TrkChunk {
+        std::mem::take(&mut self.notes_held); // Dispose of notes_held to free up the Rc's of the track events.
+
         let mut eot_event = Other::default();
         eot_event.code = Other::name_to_code("EndOfTrack").unwrap();
         self.add_other_event(eot_event);
@@ -622,11 +632,7 @@ impl TrkChunkWriter {
         let mut trk = TrkChunk::default();
         trk.preamble.trkid = self.trkid;
         trk.preamble.chanid = self.chanid;
-        trk.events.events = self.trk_events.into_iter().filter_map(|(enabled, evt)| if enabled {
-            Some(evt)
-        } else {
-            None
-        }).collect();
+        trk.events.events = self.trk_events.into_iter().map(|v| Rc::try_unwrap(v).unwrap().into_inner()).collect(); //TODO: Error handling
         trk
     }
 }

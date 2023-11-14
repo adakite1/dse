@@ -217,8 +217,8 @@ pub enum DSEError {
     _FileNameReadFailed(String),
     #[error("Failed to remove a valid key from a HashMap!")]
     _ValidHashMapKeyRemovalFailed(),
-    #[error("Corresponding note on event with known index missing!")]
-    _CorrespondingNoteOnNotFound(),
+    #[error("Event not of type Other passed into set_other_with_params_u8!")]
+    _InvalidEventTypePassedToSetOtherWithParamsU8(),
     #[error("Sample {0} specified in a preset is missing from `sample_infos`!")]
     _SampleInPresetMissing(u16),
 

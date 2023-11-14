@@ -1,4 +1,4 @@
-use std::{ops::RangeInclusive, collections::{HashMap, HashSet, BTreeMap}, io::{Read, Seek, Write}};
+use std::{ops::RangeInclusive, collections::{HashMap, HashSet, BTreeMap}, io::{Read, Seek, Write}, rc::Rc, cell::RefCell};
 
 use colored::Colorize;
 use indexmap::IndexMap;
@@ -212,14 +212,31 @@ impl FromMIDIOnce for SMDL {
 
         let midi_messages = get_midi_messages_flattened(&smf)?;
 
+        let midi_channel_contains_midi_bank_select_or_program_changes = |target_channel: u8| midi_messages.iter().any(|x| match x.kind {
+            midly::TrackEventKind::Midi { channel, message } => {
+                if (channel.as_int() + 1) == target_channel {
+                    match message {
+                        midly::MidiMessage::Controller { controller, value: _ } => {
+                            controller.as_int() == 00 // CC00 Bank Select MSB
+                        },
+                        midly::MidiMessage::ProgramChange { program: _ } => true,
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            },
+            _ => false
+        });
+
         // Copy midi messages
-        let mut programs_requiring_mapping: IndexMap<u8, Vec<(usize, (u8, u8))>> = IndexMap::new();
-        let mut map_program = |trkid, bank, program, same_tick, trk_chunk_writer: &mut TrkChunkWriter| {
+        let mut programs_requiring_mapping: IndexMap<u8, Vec<(Rc<RefCell<DSEEvent>>, (u8, u8))>> = IndexMap::new();
+        let mut map_program = |trkid, bank, program, same_tick, trk_chunk_writer: &mut TrkChunkWriter, newly_created_event: Rc<RefCell<DSEEvent>>| {
             if same_tick {
                 // Discard last. If same_tick is true, then a previous preset change has already been recorded, so this is guaranteed to remove the correct entry.
                 programs_requiring_mapping.entry(trkid).or_insert(Vec::new()).pop();
             }
-            programs_requiring_mapping.entry(trkid).or_insert(Vec::new()).push((trk_chunk_writer.next_event_index(), (bank, program)));
+            programs_requiring_mapping.entry(trkid).or_insert(Vec::new()).push((newly_created_event, (bank, program)));
             // Insert the event for now, fixing it later to be the correct value
             Some(0)
         };
@@ -231,16 +248,22 @@ impl FromMIDIOnce for SMDL {
         trks.extend((0..=15).enumerate().map(|(trkid, chanid)| {
             let mut trk = TrkChunkWriter::create(trkid as u8 + 1, chanid as u8, self.get_link_bytes()).unwrap();
             // Most soundfont players default to preset 000:000 if no MIDI Bank Select and Program Change messages are found. This matches that behavior.
-            let _ = trk.bank_select(0, true, &mut map_program); // The results can be ignored since the only failure condition is if the DSE opcode "SetProgram" could not be found, which would be very bad if that happened and this wouldn't be able to recover anyways.
-            let _ = trk.program_change(0, true, &mut map_program);
+            // There's also a special case for Channel 10, a channel reserved for drums in MIDI GM and thus has a default preset of 128:000.
+            if (trkid+1) == 10 && !midi_channel_contains_midi_bank_select_or_program_changes(10) {
+                let _ = trk.bank_select(128, true, &mut map_program); // The results can be ignored since the only failure condition is if the DSE opcode "SetProgram" could not be found, which would be very bad if that happened and this wouldn't be able to recover anyways.
+                let _ = trk.program_change(0, true, &mut map_program);
+            } else {
+                let _ = trk.bank_select(0, true, &mut map_program); // The results can be ignored since the only failure condition is if the DSE opcode "SetProgram" could not be found, which would be very bad if that happened and this wouldn't be able to recover anyways.
+                let _ = trk.program_change(0, true, &mut map_program);
+            }
             trk
         }));
         let _ = copy_midi_messages(midi_messages, &mut trks, &mut map_program)?;
         let mut song_preset_map: HashMap<(u8, u8), u8> = HashMap::new();
         let mut current_id = 0_u8;
         for (trkid, programs_requiring_mapping) in programs_requiring_mapping.into_iter() {
-            for (event_index, (bank, program)) in programs_requiring_mapping {
-                println!("trk{:02} {} bank{} prgm{}", trkid, event_index, bank, program);
+            for (event, (bank, program)) in programs_requiring_mapping {
+                println!("trk{:02} bank{} prgm{}", trkid, bank, program);
                 let program_id;
                 if let Some(&existing_program_id) = song_preset_map.get(&(bank, program)) {
                     program_id = existing_program_id;
@@ -251,12 +274,10 @@ impl FromMIDIOnce for SMDL {
                     song_preset_map.insert((bank, program), assigned_id);
                     program_id = assigned_id;
                 }
-                if let Some(evt) = trks[trkid as usize].get_event_mut(event_index) {
-                    if let DSEEvent::Other(evt) = &mut evt.1 {
-                        (&mut evt.parameters[..]).write_all(&[program_id])?;
-                    }
+                if let DSEEvent::Other(evt) = &mut *event.borrow_mut() {
+                    (&mut evt.parameters[..]).write_all(&[program_id])?;
                 } else {
-                    panic!("{}TrkChunkWriter's internal event list must never have items removed from it! However, a previously valid index is now missing!!", "Internal Error: ".red());
+                    panic!("{}TrkChunkWriter has passed an invalid event as the program change event!", "Internal Error: ".red());
                 }
             }
         }
@@ -268,7 +289,7 @@ impl FromMIDIOnce for SMDL {
         // Fill the tracks into the smdl
         let track_soundfonts = uses.iter().map(|soundfont_name| soundfonts.get(soundfont_name).ok_or(DSEError::Invalid(format!("Soundfont with name '{}' not found!", soundfont_name)))).collect::<Result<Vec<&SoundFont2>, _>>()?;
         self.trks.objects = Vec::with_capacity(trks.len());
-        for x in trks {
+        for x in trks.into_iter() {
             for ProgramUsed { bank, program, notes, is_default } in x.programs_used() {
                 let find_preset = find_preset_in_soundfonts(&track_soundfonts, *bank as u16, *program as u16);
                 if find_preset.is_none() && *is_default {

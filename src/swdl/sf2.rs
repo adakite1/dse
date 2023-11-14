@@ -507,6 +507,16 @@ pub fn find_preset_in_soundfont(soundfont: &SoundFont2, bank: u16, program: u16)
             return Some(i);
         }
     }
+    if bank == 128 && program == 0 {
+        // Handle case where the soundfont doesn't follow the soundfont2 specs and has the default drumset at 127:000 instead.
+        if let Some(resolved_i) = find_preset_in_soundfont(soundfont, 127, 0) {
+            return Some(resolved_i);
+        }
+        // Handle case where the soundfont doesn't follow the soundfont2 specs and has the default drumset at 126:000 instead.
+        if let Some(resolved_i) = find_preset_in_soundfont(soundfont, 126, 0) {
+            return Some(resolved_i);
+        }
+    }
     return None;
 }
 pub fn find_preset_in_soundfonts<'a>(soundfonts: &'a [&SoundFont2], bank: u16, program: u16) -> Option<(usize, usize)> {
