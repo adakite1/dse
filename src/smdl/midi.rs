@@ -148,6 +148,16 @@ pub fn copy_midi_messages<'a>(midi_messages: Cow<'a, [TrackEvent<'a>]>, trks: &m
                                     trk.fix_current_global_tick(global_tick)?;
                                     trk.add_other_no_params("LoopPoint")?;
                                 }
+                            } else if marker.trim().to_lowercase() == "loopend" {
+                                for trk in trks.iter_mut() {
+                                    trk.fix_current_global_tick(global_tick)?;
+                                    for val in 0..u8::MAX { // Reset synth
+                                        trk.note_off(val)?;
+                                    }
+                                }
+                                break;
+                            } else if marker.trim().to_lowercase() == "loopendnoreset" {
+                                break;
                             } else if marker.trim().to_lowercase().starts_with("signal") {
                                 let cmd = marker.trim().to_lowercase();
                                 let signal_val: u8 = cmd[6..].replace("(", "").replace(")", "").trim().parse::<u8>().map_err(|_| DSEError::Invalid("MIDI Marker 'Signal(n)' must have a uint8 as its parameter!".to_string()))?;
