@@ -7,7 +7,7 @@ use crate::math::{timecents_to_milliseconds, gain};
 use crate::swdl::{SWDL, SampleInfo, ADSRVolumeEnvelope, ProgramInfo, SplitEntry, LFOEntry, PCMDChunk, Tuning};
 use crate::dtype::{DSEError, PointerTable};
 
-use dse_dsp_sys::{process_mono_preserve_looping, SampleRateChoicePreference, init_deltas, block_alignment};
+use dse_dsp_sys::{adpcm_encode_16bitpcm_byte_pos_preview_batch, block_alignment, process_16bitpcm_preserve_looping, resample_len_preview, SampleRateChoicePreference};
 use soundfont::data::{SampleHeader, GeneratorType};
 use soundfont::{SoundFont2, Zone, Preset, Instrument};
 
@@ -17,7 +17,8 @@ pub struct DSPOptions {
     pub resample_threshold: u32,
     pub sample_rate: f64,
     pub sample_rate_relative: bool,
-    pub adpcm_encoder_lookahead: i32
+    pub adpcm_encoder_lookahead: i32,
+    pub adpcm_encoder_noise_shaping: i32
 }
 pub fn copy_raw_sample_data<R>(mut sf2file: R, sf2: &SoundFont2, bank: &mut SWDL, dsp_options: DSPOptions, sample_rate_adjustment_curve: usize, pitch_adjust: i64, mut filter_samples: impl FnMut(usize, &SampleHeader) -> bool) -> Result<(HashMap<u16, u16>, BTreeMap<u16, SampleInfo>), DSEError>
 where
@@ -109,18 +110,24 @@ where
                     raw_sample_data_loop = &raw_sample_data[..];
                 }
                 let resampled;
-                let tracking;
-                (resampled, new_sample_rate, tracking) = process_mono_preserve_looping(
-                    raw_sample_data_pre_loop,
-                    raw_sample_data_loop,
+                let samples_per_block;
+                (resampled, new_sample_rate, samples_per_block) = process_16bitpcm_preserve_looping(
+                    &[raw_sample_data_pre_loop],
+                    &[raw_sample_data_loop],
                     sample_header.sample_rate as f64,
                     new_sample_rate,
-                    dsp_options.adpcm_encoder_lookahead, init_deltas::averaging, 128, block_alignment::To8Bytes(), SampleRateChoicePreference::Higher,
+                    dsp_options.adpcm_encoder_lookahead, dsp_options.adpcm_encoder_noise_shaping, 128, block_alignment::To8Bytes(), SampleRateChoicePreference::Higher,
                     None);
                 new_sample_rate = new_sample_rate.round(); // Rounding is required since the smplrate value in DSE is u32
+                let tracking = {
+                    let pre_loop_resampled_length = resample_len_preview(sample_header.sample_rate as f64, new_sample_rate, raw_sample_data_pre_loop.len());
+                    let loop_resampled_length = resample_len_preview(sample_header.sample_rate as f64, new_sample_rate, raw_sample_data_loop.len());
+                    let loop_start_in_sample_points = pre_loop_resampled_length;
+                    let loop_end_in_sample_points = if pre_loop_resampled_length == 0 && loop_resampled_length == 0 { 0 } else { pre_loop_resampled_length + loop_resampled_length - 1 };
+                    adpcm_encode_16bitpcm_byte_pos_preview_batch(samples_per_block, 1, &[loop_start_in_sample_points, loop_end_in_sample_points])
+                };
                 (resampled, tracking)
             };
-            let new_loop_bounds = new_loop_bounds.unwrap();
             sample_info.smplrate = new_sample_rate as u32; // Set new sample rate
             let mut tuning = sample_rate_adjustment(new_sample_rate, sample_rate_adjustment_curve, pitch_adjust)?;
             tuning.add_cents(sample_header.pitchadj as i64);

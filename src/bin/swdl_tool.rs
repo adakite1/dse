@@ -7,11 +7,12 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Parser, command, Subcommand};
+use clap::{Parser, command, Subcommand, ValueEnum};
 use dse::swdl::sf2::{copy_raw_sample_data, copy_presets, DSPOptions};
 use dse::swdl::{SWDL, PRGIChunk, KGRPChunk, Keygroup, create_swdl_shell};
 use dse::dtype::{DSEError, SongBuilderFlags};
 
+use dse_dsp_sys::{NOISE_SHAPING_DYNAMIC, NOISE_SHAPING_OFF, NOISE_SHAPING_STATIC};
 use soundfont::SoundFont2;
 
 use dse::fileutils::{valid_file_of_type, open_file_overwrite_rw, get_file_last_modified_date_with_default};
@@ -66,6 +67,15 @@ pub fn get_final_output_folder(_output_folder: &Option<PathBuf>) -> Result<PathB
 struct Cli {
     #[command(subcommand)]
     command: Commands
+}
+
+#[derive(Parser, Debug, Clone, Copy, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab_case")]
+#[repr(i32)]
+pub enum AdpcmXqNoiseShaping {
+    Off = NOISE_SHAPING_OFF,
+    Static = NOISE_SHAPING_STATIC,
+    Dynamic = NOISE_SHAPING_DYNAMIC
 }
 
 #[derive(Subcommand)]
@@ -123,6 +133,10 @@ enum Commands {
         /// The lookahead for the ADPCM encoding process. A higher value allows the encoder to look further into the future to find the optimum coding sequence for the file. Default is 3, but experimentation with higher values is recommended.
         #[arg(short = 'l', long, default_value_t = 3)]
         adpcm_encoder_lookahead: c_int,
+
+        /// The noise shaping setting for the ADPCM encoding process. 
+        #[arg(short = 's', long, value_enum, default_value_t = AdpcmXqNoiseShaping::Dynamic)]
+        adpcm_encoder_noise_shaping: AdpcmXqNoiseShaping,
 
         /// Adjusts the pitch of all samples (in cents)
         #[arg(short = 'P', long, default_value_t = 0, allow_hyphen_values = true)]
@@ -197,7 +211,7 @@ fn main() -> Result<(), DSEError> {
 
             println!("\nAll files successfully processed.");
         }
-        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead, pitch_adjust } => {
+        Commands::AddSF2 { input_glob, output_folder, swdl: swdl_path, out_swdl: out_swdl_path, resample_threshold, sample_rate, sample_rate_adjustment_curve, adpcm_encoder_lookahead, adpcm_encoder_noise_shaping, pitch_adjust } => {
             let (source_file_format, change_ext) = ("sf2", "swd");
             let output_folder = get_final_output_folder(output_folder)?;
             let input_file_paths: Vec<(PathBuf, PathBuf)> = get_input_output_pairs(input_glob, source_file_format, &output_folder, change_ext)?;
@@ -242,7 +256,7 @@ fn main() -> Result<(), DSEError> {
                 
                 let sf2 = SoundFont2::load(&mut File::open(&input_file_path)?).map_err(|x| DSEError::SoundFontParseError(format!("{:?}", x)))?;
                 
-                let (sample_mappings, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, sample_rate_relative: false, adpcm_encoder_lookahead: *adpcm_encoder_lookahead }, *sample_rate_adjustment_curve, *pitch_adjust, |_, _| true)?;
+                let (sample_mappings, mut sample_infos) = copy_raw_sample_data(&File::open(&input_file_path)?, &sf2, &mut main_bank_swdl, DSPOptions { resample_threshold: *resample_threshold, sample_rate: *sample_rate as f64, sample_rate_relative: false, adpcm_encoder_lookahead: *adpcm_encoder_lookahead, adpcm_encoder_noise_shaping: *adpcm_encoder_noise_shaping as i32 }, *sample_rate_adjustment_curve, *pitch_adjust, |_, _| true)?;
 
                 let fname = input_file_path.file_name().ok_or(DSEError::_FileNameReadFailed(input_file_path.display().to_string()))?
                     .to_str().ok_or(DSEError::DSEFileNameConversionNonUTF8("SF2".to_string(), input_file_path.display().to_string()))?
